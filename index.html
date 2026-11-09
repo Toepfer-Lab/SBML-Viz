@@ -28,6 +28,10 @@
       <span id="chip-stats" class="muted"></span>
       <span id="chip-flux" class="flux-text"></span>
     </div>
+    <div class="seg seg-2 tabs" id="tabs" role="tablist" aria-label="View" hidden>
+      <button role="tab" data-tab="graph" aria-controls="graph">Graph</button>
+      <button role="tab" data-tab="decoding" aria-controls="decoding">ID decoding</button>
+    </div>
     <div class="spacer"></div>
     <div class="actions" id="model-actions" hidden>
       <button class="btn" id="btn-open">Open model…</button>
@@ -259,6 +263,58 @@
           <button class="switch only-3d" role="switch" data-key="grid">Floor grid</button>
           <span class="muted small">Forces run until the layout settles, then it freezes: dragging moves only that node. Use the layout button in the view to run forces again.</span>
         </div>
+
+        <div class="stack-10">
+          <h3 class="eyebrow">ID decoding</h3>
+          <span class="muted small" id="decode-note"></span>
+          <button class="btn small" data-action="decoding">Review IDs and decoding settings</button>
+        </div>
+      </section>
+
+      <section class="decoding" id="decoding" role="tabpanel" aria-label="ID decoding" hidden>
+        <div class="decoding-inner">
+          <div class="enc-cards">
+            <div class="enc-card">
+              <div class="enc-head">
+                <h2 class="enc-title">cobrapy encoding</h2>
+                <span class="enc-found" id="enc-cobra-found"><span class="dot" aria-hidden="true"></span><span></span></span>
+              </div>
+              <button class="switch" role="switch" data-key="decodeCobra">Decode cobrapy IDs</button>
+              <span class="muted small">M_ / R_ / G_ prefixes and characters written as codes: <span class="mono">M_P_C00001__91__m__93__</span> → <span class="mono">P_C00001[m]</span>.</span>
+            </div>
+            <div class="enc-card">
+              <div class="enc-head">
+                <h2 class="enc-title">COBRA Toolbox encoding</h2>
+                <span class="help" tabindex="0" aria-describedby="legacy-tip">?<span class="tip" role="tooltip" id="legacy-tip">cobrapy decodes its own encoding (M_ / R_ / G_ prefixes and __NN__ codes) when it reads a file, but leaves COBRA Toolbox tokens such as _PERIOD_ as they are. For IDs identical to what cobrapy shows, tick only “Decode cobrapy IDs”.</span></span>
+                <span class="enc-found" id="enc-legacy-found"><span class="dot" aria-hidden="true"></span><span></span></span>
+              </div>
+              <button class="switch" role="switch" data-key="decodeLegacy">Decode COBRA Toolbox tokens</button>
+              <span class="muted small">Characters spelled as tokens: <span class="mono">_PERIOD_</span> → <span class="mono">.</span>, <span class="mono">_DASH_</span> → <span class="mono">-</span>, <span class="mono">_LSQBKT_</span> → <span class="mono">[</span> and so on.</span>
+            </div>
+          </div>
+          <p class="decode-summary" id="decode-summary"></p>
+          <p class="muted small">Both decodings run automatically when their encoding is found. Where a decoding step would make two IDs equal, that step is skipped for the ID it would change, and both IDs are marked under Problems. Flux rows match in any of these forms, whatever is ticked. The layout stays when you change a setting.</p>
+          <div class="table-tools">
+            <label class="visually-hidden" for="decode-search">Search IDs</label>
+            <input id="decode-search" type="search" placeholder="Search IDs" autocomplete="off">
+            <div class="seg seg-2" role="group" aria-label="Table">
+              <button data-decode-list="model">Model IDs</button>
+              <button data-decode-list="flux">Flux file</button>
+            </div>
+            <div class="seg seg-3" role="group" aria-label="Rows">
+              <button data-decode-filter="all">All</button>
+              <button data-decode-filter="changed">Changed</button>
+              <button data-decode-filter="problems">Problems</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="id-table">
+              <thead id="decode-head"></thead>
+              <tbody id="decode-body"></tbody>
+            </table>
+          </div>
+          <p class="muted small" id="decode-more"></p>
+        </div>
       </section>
     </main>
 
@@ -266,6 +322,6 @@
   </div>
 
   <div class="drop-overlay" id="drop-overlay" hidden><span>Drop an SBML model or a flux CSV</span></div>
-  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 </body>
 </html>

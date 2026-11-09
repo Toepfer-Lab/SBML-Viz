@@ -1,14 +1,25 @@
-import { parseSBML, modelFromGraphJSON, parseFluxCSV, matchFlux, modelKey } from './model.js';
+import { parseSBML, modelFromGraphJSON, parseFluxCSV, matchFlux, modelKey, findEncodings, findFluxEncodings, decodeModelIds } from './model.js';
 import { FLUX_EPS, fluxDomain, inFluxRange, buildIndex, buildGraph, compartmentStyles, detectSide, speciesSummary, sideKeyOf, findPath } from './graph.js';
 import { createView3D } from './view.js';
 import { createView2D } from './view2d.js';
-import { fluxScale } from './style.js';
+import { fluxScale, escapeHtml } from './style.js';
 import * as ui from './ui.js';
 
 const $ = id => document.getElementById(id);
 
 const state = {
-  model: null,
+  model: null,             // as shown: ids decoded where an encoding was found
+  rawModel: null,          // as parsed from the file
+  ids: new Map(),          // SBML id -> shown id, for ids that differ
+  sbmlIds: new Map(),      // shown id -> SBML id
+  decodeCobra: readPref('decodeCobra', true),
+  decodeLegacy: readPref('decodeLegacy', true),
+  decoding: null,          // { found, entries } from decodeModelIds, for the ID decoding tab
+  fluxRows: null,          // the flux table as read, matched again whenever ids change
+  fluxMatch: null,         // matchFlux entries
+  tab: 'graph',            // 'graph' | 'decoding'
+  decodeList: 'model',     // ID decoding table: 'model' | 'flux'
+  decodeFilter: 'all',     // 'all' | 'changed' | 'problems'
   index: null,
   flux: new Map(),
   styles: new Map(),
@@ -42,8 +53,10 @@ const state = {
   hiddenByFlux: 0,
 };
 
-// Node positions per view mode, so 2D and 3D keep separate layouts.
+// Node positions per view mode, so 2D and 3D keep separate layouts. Keyed by
+// SBML id (see layoutId), so they survive a change of ID decoding.
 const layouts = { 2: {}, 3: {} };
+let layoutIds = new Map(); // node id in the drawn graph -> its key in `layouts`
 
 let view = null;
 const VIEW_OPTIONS = ['drag', 'cluster', 'grid', 'labels', 'particles', 'rotate', 'quality'];
@@ -54,7 +67,7 @@ function mountView(dims) {
   view = create($('graph'), {
     onNodeClick: n => select(n.id),
     onFrozen: () => {
-      Object.assign(layouts[state.dims], view.positions());
+      storePositions();
       if (state.live) {
         state.live = false;
         renderLayoutToggle();
@@ -82,29 +95,60 @@ let lastFps = performance.now();
 
 // --- loading ------------------------------------------------------------------
 
-function loadModel(model, flux, fileName) {
+// `fluxRows` ([id, v] pairs, or null) is matched against the ids as shown.
+// `quiet` skips the decoding note. `keep` ({ selected, focus, scope } with SBML
+// ids) re-shows the same file with a decoding setting changed: layouts,
+// hidden compartments, side metabolites and the selection carry over.
+function loadModel(raw, fluxRows, fileName, { quiet = false, keep = null } = {}) {
+  state.rawModel = raw;
+  const found = findEncodings(raw);
+  const { model, entries } = decodeModelIds(raw, {
+    cobra: state.decodeCobra && found.cobra > 0,
+    legacy: state.decodeLegacy && found.legacy > 0,
+  });
+  state.decoding = { found, entries };
+  state.ids = new Map(entries.filter(e => e.kind !== 'gene' && e.raw !== e.shown).map(e => [e.raw, e.shown]));
+  state.sbmlIds = new Map([...state.ids].map(([id, shown]) => [shown, id]));
   state.model = model;
   state.index = buildIndex(model);
-  state.flux = flux || new Map();
+  const matched = fluxRows ? matchFlux(model, fluxRows, sbmlId) : null;
+  state.fluxRows = fluxRows;
+  state.fluxMatch = matched?.entries || null;
+  state.flux = matched?.flux || new Map();
+  if (state.decodeList === 'flux' && !state.fluxMatch) state.decodeList = 'model';
   resetFluxFilter();
   state.styles = compartmentStyles(model);
   state.fileName = fileName;
-  state.side = new Set(detectSide(state.index));
-  state.hiddenCompartments = new Set([...state.styles.values()].filter(c => c.label === 'Boundary').map(c => c.id));
-  state.scope = 'whole';
-  state.focus = state.selected = state.path = null;
+  if (!keep) {
+    state.side = new Set(detectSide(state.index));
+    state.hiddenCompartments = new Set([...state.styles.values()].filter(c => c.label === 'Boundary').map(c => c.id));
+    layouts[2] = {};
+    layouts[3] = {};
+  }
+  const kept = id => (id && (model.species.has(shownId(id)) || model.reactions.has(shownId(id))) ? shownId(id) : null);
+  state.focus = kept(keep?.focus);
+  state.selected = kept(keep?.selected);
+  state.scope = keep?.scope === 'hood' && state.focus ? 'hood' : 'whole';
+  state.path = null;
   state.showCut = false;
-  state.live = true;
-  layouts[2] = {};
-  layouts[3] = {};
+  state.live = !Object.keys(layouts[state.dims]).length;
 
   $('import').hidden = true;
   $('app').hidden = false;
   $('model-chip').hidden = false;
   $('model-actions').hidden = false;
+  $('tabs').hidden = false;
   mountView(state.dims);
   rebuild();
   setTimeout(() => view.fit(), 1500);
+  const renamed = entries.filter(e => e.raw !== e.shown).length;
+  if (renamed && !quiet) {
+    const layers = [...new Set(entries.flatMap(e => e.applied))];
+    const clashes = entries.filter(e => e.clash).length;
+    const what = layers.length > 1 ? 'cobrapy and COBRA Toolbox encodings' : `${layers[0]}-specific encoding`;
+    toast(`${what} detected: ${renamed} IDs shown in readable form${clashes ? `; ${clashes} not fully decoded, as that would make two IDs equal` : ''}.`,
+      false, 10000, { label: 'Review', run: () => showTab('decoding', 'model') });
+  }
   $('species-options').innerHTML = [...model.species.keys()].sort()
     .map(id => `<option value="${id.replace(/"/g, '&quot;')}">`).join('');
   ui.renderPathResult($('path-result'), null);
@@ -118,19 +162,26 @@ function loadFlux(text, name) {
     return;
   }
   const { rows, bad } = parseFluxCSV(text);
-  const { flux, unmatched } = matchFlux(state.model, rows);
+  const { flux, entries, unmatched } = matchFlux(state.model, rows, sbmlId);
   if (!flux.size) {
-    toast(`No rows in ${name} matched a reaction in the model. Check that IDs use the same prefix (e.g. with or without R_).`, true);
+    toast(`No rows in ${name} matched a reaction in the model, even with cobrapy and COBRA Toolbox encodings decoded.`, true);
     return;
   }
+  state.fluxRows = rows;
+  state.fluxMatch = entries;
   state.flux = flux;
   resetFluxFilter();
   rebuild();
   renderAll();
+  const decoded = entries.filter(e => e.how === 'decoded').length;
+  const ambiguous = entries.filter(e => e.status === 'ambiguous').length;
   const notes = [];
-  if (unmatched.length) notes.push(`${unmatched.length} rows matched no reaction (e.g. ${unmatched.slice(0, 3).join(', ')})`);
+  if (decoded) notes.push(`${decoded} matched after decoding their IDs`);
+  if (ambiguous) notes.push(`${ambiguous} skipped because they fit more than one reaction`);
+  if (unmatched.length > ambiguous) notes.push(`${unmatched.length - ambiguous} matched no reaction (e.g. ${entries.filter(e => e.status === 'unmatched').slice(0, 3).map(e => e.id).join(', ')})`);
   if (bad) notes.push(`${bad} rows had no numeric flux`);
-  toast(`Loaded flux for ${flux.size} reactions.${notes.length ? ' ' + notes.join('; ') + '.' : ''}`, !!unmatched.length);
+  toast(`Loaded flux for ${flux.size} reactions.${notes.length ? ' ' + notes.join('; ') + '.' : ''}`, unmatched.length > 0,
+    undefined, decoded || unmatched.length ? { label: 'Review', run: () => showTab('decoding', 'flux') } : null);
 }
 
 function showProgress(label, fraction) {
@@ -187,7 +238,7 @@ async function loadSBML(source, name) {
     const model = await parseInWorker(source, name);
     showProgress('Building graph', 1);
     await new Promise(r => setTimeout(r, 30));
-    loadModel(model, new Map(), name);
+    loadModel(model, null, name);
     return true;
   } catch (err) {
     showStatus('error', `Could not read ${name}`, err.message);
@@ -221,7 +272,7 @@ async function loadExample() {
 
 function rebuild() {
   // Remember where everything is before the graph changes.
-  if (view) Object.assign(layouts[state.dims], view.positions());
+  if (view) storePositions();
   const graph = buildGraph(state.model, state.index, state.flux, {
     scope: state.scope,
     focus: state.focus,
@@ -239,10 +290,11 @@ function rebuild() {
 
   // 2D and 3D are independent: each mode seeds only from its own layout, and
   // a mode never laid out generates one with its own forces.
+  layoutIds = new Map(graph.nodes.map(n => [n.id, layoutId(n)]));
   const own = layouts[state.dims];
-  const hasOwn = graph.nodes.some(n => own[n.id]);
+  const hasOwn = graph.nodes.some(n => own[layoutIds.get(n.id)]);
   for (const n of graph.nodes) {
-    const p = own[n.id];
+    const p = own[layoutIds.get(n.id)];
     if (!p) continue;
     n.x = p[0];
     n.y = p[1];
@@ -274,7 +326,7 @@ function select(id, { fly = false, refocus = false } = {}) {
 function setLive(on) {
   state.live = on;
   view.setLive(on);
-  if (!on) Object.assign(layouts[state.dims], view.positions());
+  if (!on) storePositions();
   renderLayoutToggle();
 }
 
@@ -350,6 +402,10 @@ function renderAll() {
   $('side-options').innerHTML = [...state.index.bases.keys()].filter(k => !state.side.has(k)).sort()
     .map(k => `<option value="${k.replace(/"/g, '&quot;')}">`).join('');
   renderFluxFilter();
+  $('decode-note').textContent = decodeSummary();
+  for (const b of document.querySelectorAll('#tabs [data-tab]')) b.setAttribute('aria-selected', String(b.dataset.tab === state.tab));
+  $('decoding').hidden = state.tab !== 'decoding';
+  if (state.tab === 'decoding') renderDecoding();
   const [lo, hi] = state.colorRange || [];
   $('legend-min').textContent = lo === undefined ? '' : ui.formatFlux(lo);
   $('legend-max').textContent = hi === undefined ? '' : ui.formatFlux(hi);
@@ -447,8 +503,18 @@ function search(q) {
 
 // --- layouts, export, messages --------------------------------------------------------
 
+// Keyed by the file as parsed, so a saved layout is found whatever is decoded.
 function layoutKey() {
-  return 'sbml-viz:layout:' + modelKey(state.model);
+  return 'sbml-viz:layout:' + modelKey(state.rawModel);
+}
+
+// A side metabolite copy (species@reaction) is keyed by both SBML ids.
+function layoutId(n) {
+  return n.kind === 'side' ? `${sbmlId(n.ref)}@${sbmlId(n.reaction)}` : sbmlId(n.id);
+}
+
+function storePositions() {
+  for (const [id, p] of Object.entries(view.positions())) layouts[state.dims][layoutIds.get(id) ?? id] = p;
 }
 
 function readLayout() {
@@ -460,7 +526,7 @@ function readLayout() {
 }
 
 function saveLayout() {
-  Object.assign(layouts[state.dims], view.positions());
+  storePositions();
   try {
     localStorage.setItem(layoutKey(), JSON.stringify({ v: 2, 2: layouts[2], 3: layouts[3] }));
     $('btn-restore').disabled = false;
@@ -493,14 +559,20 @@ function exportPng() {
   a.click();
 }
 
-let toastTimer = 0;
-function toast(text, isError = false) {
-  const el = $('toast');
-  el.textContent = text;
-  el.classList.toggle('error', isError);
-  el.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, isError ? 8000 : 4000);
+// Messages stack while earlier ones are still showing; each leaves on its own time.
+function toast(text, isError = false, ms = isError ? 8000 : 4000, action = null) {
+  const el = document.createElement('div');
+  el.className = isError ? 'toast error' : 'toast';
+  el.append(text);
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'btn small';
+    b.textContent = action.label;
+    b.addEventListener('click', () => { el.remove(); action.run(); });
+    el.append(b);
+  }
+  $('toasts').append(el);
+  setTimeout(() => el.remove(), ms);
 }
 
 function showStatus(kind, title, body) {
@@ -540,7 +612,7 @@ function setOption(key, raw) {
 }
 
 function switchDims(dims) {
-  Object.assign(layouts[state.dims], view.positions());
+  storePositions();
   state.dims = dims;
   if (dims === 2) state.rotate = false;
   // A mode with a saved layout opens frozen, exactly as it was left.
@@ -624,7 +696,23 @@ function wire() {
     const t = e.target.closest('button');
     if (!t || t.disabled) return;
     if (t.dataset.select) {
+      if (t.closest('#decoding')) showTab('graph');
       select(t.dataset.select, { fly: true, refocus: t.closest('#results') !== null });
+      return;
+    }
+    if (t.dataset.tab) {
+      showTab(t.dataset.tab);
+      return;
+    }
+    if (t.dataset.decodeList || t.dataset.decodeFilter) {
+      if (t.dataset.decodeList) state.decodeList = t.dataset.decodeList;
+      if (t.dataset.decodeFilter) state.decodeFilter = t.dataset.decodeFilter;
+      renderDecoding();
+      return;
+    }
+    if (t.dataset.find !== undefined) {
+      $('decode-search').value = t.dataset.find;
+      renderDecoding();
       return;
     }
     if (t.dataset.pathFrom || t.dataset.pathTo) {
@@ -642,6 +730,11 @@ function wire() {
     if (t.classList.contains('switch')) {
       const key = t.dataset.key;
       state[key] = !state[key];
+      if (key === 'decodeCobra' || key === 'decodeLegacy') {
+        writePref(key, state[key]);
+        reshowModel();
+        return;
+      }
       if (key === 'showZero') rebuild();
       else view.set(key, state[key]);
       renderAll();
@@ -665,6 +758,7 @@ function wire() {
       case 'expand': state.hops = Math.min(6, state.hops + 1); rebuild(); renderAll(); break;
       case 'hood': openNeighbourhood(); break;
       case 'clear': select(null); break;
+      case 'decoding': showTab('decoding'); break;
     }
   });
 
@@ -699,6 +793,7 @@ function wire() {
     });
   }
   $('scale-open').addEventListener('click', showFluxSettings);
+  $('decode-search').addEventListener('input', renderDecoding);
 
   $('hops-down').addEventListener('click', () => changeHops(-1));
   $('hops-up').addEventListener('click', () => changeHops(1));
@@ -721,6 +816,135 @@ function wire() {
     view.set('rotate', state.rotate);
     renderAll();
   });
+}
+
+// --- ID decoding --------------------------------------------------------------------
+
+const ROW_LIMIT = 300;
+
+function shownId(id) {
+  return state.ids.get(id) ?? id;
+}
+
+function sbmlId(id) {
+  return state.sbmlIds.get(id) ?? id;
+}
+
+// Show the same file again with a decoding setting changed; the flux table is
+// matched again, and the layout and selection carry over by SBML id.
+function reshowModel() {
+  if (!state.rawModel) return;
+  storePositions();
+  loadModel(state.rawModel, state.fluxRows, state.fileName, {
+    quiet: true,
+    keep: { selected: sbmlId(state.selected), focus: sbmlId(state.focus), scope: state.scope },
+  });
+}
+
+function showTab(tab, list) {
+  state.tab = tab;
+  if (list && (list === 'model' || state.fluxMatch)) state.decodeList = list;
+  renderAll();
+}
+
+function decodeSummary() {
+  const entries = state.decoding?.entries || [];
+  const renamed = entries.filter(e => e.raw !== e.shown).length;
+  const clashes = entries.filter(e => e.clash).length;
+  const parts = [renamed ? `${renamed} IDs shown decoded` : 'IDs shown as written in the file'];
+  if (clashes) parts.push(`${clashes} not fully decoded (clash)`);
+  if (state.fluxMatch) {
+    const m = state.fluxMatch;
+    const matched = m.filter(e => e.reaction).length;
+    const decoded = m.filter(e => e.how === 'decoded').length;
+    parts.push(`flux: ${matched} of ${m.length} rows matched${decoded ? `, ${decoded} after decoding` : ''}`);
+  }
+  return parts.join(' · ') + '.';
+}
+
+function encodingFound(el, model, flux) {
+  el.classList.toggle('found', model + flux > 0);
+  el.querySelector('span:last-child').textContent = model + flux
+    ? `Found · model: ${model} IDs${state.fluxMatch ? ` · flux file: ${flux} rows` : ''}`
+    : `Not found${state.fluxMatch ? ' in the model or the flux file' : ' in this model'}`;
+}
+
+function renderDecoding() {
+  if (!state.decoding) return;
+  const { found, entries } = state.decoding;
+  const fluxFound = state.fluxMatch ? findFluxEncodings(state.fluxMatch.map(e => e.id)) : { cobra: 0, legacy: 0 };
+  encodingFound($('enc-cobra-found'), found.cobra, fluxFound.cobra);
+  encodingFound($('enc-legacy-found'), found.legacy, fluxFound.legacy);
+  for (const sw of document.querySelectorAll('#decoding .switch[data-key]')) {
+    sw.setAttribute('aria-checked', String(!!state[sw.dataset.key]));
+  }
+
+  const flux = state.decodeList === 'flux' && state.fluxMatch;
+  const clashes = entries.filter(e => e.clash).length;
+  const problems = flux
+    ? state.fluxMatch.filter(e => !e.reaction).length
+    : entries.filter(e => e.clash || e.clashedBy.length).length;
+  $('decode-summary').innerHTML = escapeHtml(decodeSummary())
+    + (clashes ? ` <span class="problem-text">⚠ ${clashes} ${clashes === 1 ? 'ID is' : 'IDs are'} not fully decoded, as that would make ${clashes === 1 ? 'it equal another ID' : 'them equal other IDs'}. See Problems.</span>` : '');
+  for (const b of document.querySelectorAll('[data-decode-list]')) {
+    b.setAttribute('aria-pressed', String(b.dataset.decodeList === (flux ? 'flux' : 'model')));
+    b.disabled = b.dataset.decodeList === 'flux' && !state.fluxMatch;
+  }
+  for (const b of document.querySelectorAll('[data-decode-filter]')) {
+    b.setAttribute('aria-pressed', String(b.dataset.decodeFilter === state.decodeFilter));
+    if (b.dataset.decodeFilter === 'problems') b.textContent = `Problems (${problems})`;
+  }
+
+  const q = $('decode-search').value.trim().toLowerCase();
+  const hit = (...xs) => !q || xs.some(x => x && x.toLowerCase().includes(q));
+  let rows;
+  if (flux) {
+    rows = state.fluxMatch.filter(e => hit(e.id, e.reaction, sbmlId(e.reaction || ''), ...(e.candidates || []))
+      && (state.decodeFilter === 'all'
+        || (state.decodeFilter === 'changed' && e.reaction && e.how !== 'exact')
+        || (state.decodeFilter === 'problems' && !e.reaction)));
+    $('decode-head').innerHTML = '<tr><th>In the flux file</th><th>Reaction</th><th>Status</th></tr>';
+  } else {
+    const keep = e => hit(e.raw, e.shown, e.clash?.as)
+      && (state.decodeFilter === 'all'
+        || (state.decodeFilter === 'changed' && e.raw !== e.shown)
+        || (state.decodeFilter === 'problems' && (e.clash || e.clashedBy.length)));
+    // Ids that clashed are found and listed together, where the first of them is.
+    const members = new Map();
+    for (const e of entries) if (e.group) (members.get(e.group) || members.set(e.group, []).get(e.group)).push(e);
+    rows = [];
+    for (const e of entries) {
+      if (!e.group) {
+        if (keep(e)) rows.push(e);
+      } else if (members.get(e.group)[0] === e && members.get(e.group).some(keep)) {
+        rows.push(...members.get(e.group));
+      }
+    }
+    $('decode-head').innerHTML = '<tr><th>Type</th><th>In the SBML file</th><th>Shown as</th><th>Status</th></tr>';
+  }
+  // Never cut a clash group in half at the row limit.
+  let end = Math.min(rows.length, ROW_LIMIT);
+  while (end < rows.length && rows[end].group && rows[end].group === rows[end - 1].group) end++;
+  $('decode-body').innerHTML = rows.slice(0, end).map(flux ? ui.fluxMatchRow : ui.decodeRow).join('')
+    || `<tr><td colspan="4" class="muted">No ${q ? 'matching ' : ''}rows.</td></tr>`;
+  $('decode-more').textContent = rows.length > end
+    ? `Showing ${end} of ${rows.length} rows. Search to narrow them down.`
+    : `${rows.length} ${rows.length === 1 ? 'row' : 'rows'}.`;
+}
+
+function readPref(key, fallback) {
+  try {
+    const v = localStorage.getItem('sbml-viz:pref:' + key);
+    return v === null ? fallback : JSON.parse(v);
+  } catch {
+    return fallback;
+  }
+}
+
+function writePref(key, value) {
+  try {
+    localStorage.setItem('sbml-viz:pref:' + key, JSON.stringify(value));
+  } catch { /* preference only */ }
 }
 
 // --- flux filter ---------------------------------------------------------------------
@@ -832,14 +1056,14 @@ async function loadFromUrl() {
     rebuild();
     renderAll();
   }
-  const focus = params.get('focus');
+  const focus = params.get('focus') && shownId(params.get('focus'));
   if (focus && (state.model.species.has(focus) || state.model.reactions.has(focus))) {
     select(focus);
     openNeighbourhood();
   }
   if (params.get('from') && params.get('to')) {
-    $('path-from').value = params.get('from');
-    $('path-to').value = params.get('to');
+    $('path-from').value = shownId(params.get('from'));
+    $('path-to').value = shownId(params.get('to'));
     runPath();
   }
 }

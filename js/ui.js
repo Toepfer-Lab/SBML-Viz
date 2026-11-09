@@ -190,3 +190,52 @@ export function renderPathResult(el, result, model, flux) {
       return `<li class="${isRxn ? 'rxn' : 'met'}"><button data-select="${esc(id)}">${esc(id)}</button></li>`;
     }).join('')}</ol>`;
 }
+
+// --- ID decoding table -----------------------------------------------------------------
+
+const idCell = (id, selectable) => (selectable
+  ? `<button class="link-btn mono" data-select="${esc(id)}" title="Show in the graph">${esc(id)}</button>`
+  : `<span class="mono">${esc(id)}</span>`);
+const findBtn = (text, find) => `<button class="link-btn mono" data-find="${esc(find)}" title="Show both rows">${esc(text)}</button>`;
+
+export function decodeRow(e, i, rows) {
+  let status;
+  if (e.clash) {
+    status = `<span class="problem-text">⚠ Clash: ${esc(e.clash.layer)} decoding skipped, as it would turn this ID into ${findBtn(e.clash.as, e.clash.as)}, the same ID as ${findBtn(e.clash.with, e.clash.as)}.</span>`;
+  } else if (e.clashedBy.length) {
+    status = `<span class="problem-text">⚠ Clash partner: ${e.clashedBy.map(id => findBtn(id, e.shown)).join(', ')} would decode to this ID too, so that decoding step is skipped there.</span>`;
+  } else if (e.raw !== e.shown) {
+    status = `<span class="muted">Decoded (${esc(e.applied.join(' + '))})</span>`;
+  } else {
+    status = '<span class="muted">Unchanged</span>';
+  }
+  const cls = [];
+  if (e.clash || e.clashedBy.length) cls.push('problem');
+  if (e.group) {
+    cls.push('grouped');
+    if (rows[i - 1]?.group !== e.group) cls.push('group-first');
+    if (rows[i + 1]?.group !== e.group) cls.push('group-last');
+  }
+  return `<tr${cls.length ? ` class="${cls.join(' ')}"` : ''}><td class="muted kind">${e.kind}</td><td><span class="mono">${esc(e.raw)}</span></td>`
+    + `<td>${idCell(e.shown, e.kind !== 'gene')}</td><td>${status}</td></tr>`;
+}
+
+const HOW = {
+  exact: 'Matched exactly',
+  prefix: 'Matched with/without the R_ prefix',
+  sbml: 'Matched the ID as written in the SBML file',
+  decoded: 'Matched after decoding the IDs',
+};
+
+export function fluxMatchRow(e) {
+  let status;
+  if (e.status === 'ambiguous') {
+    status = `<span class="problem-text">⚠ Skipped: fits ${e.candidates.length} reactions once decoded (${e.candidates.map(id => idCell(id, true)).join(', ')})</span>`;
+  } else if (e.status === 'unmatched') {
+    status = '<span class="problem-text">⚠ No reaction with this ID</span>';
+  } else {
+    status = `<span class="muted">${HOW[e.how]}</span>`;
+  }
+  return `<tr${e.reaction ? '' : ' class="problem"'}><td><span class="mono">${esc(e.id)}</span></td>`
+    + `<td>${e.reaction ? idCell(e.reaction, true) : '<span class="muted">–</span>'}</td><td>${status}</td></tr>`;
+}

@@ -223,6 +223,141 @@ export function parseSBML(text, onProgress) {
   return { ...model, compartments, species, reactions, groups };
 }
 
+// --- id decoding ------------------------------------------------------------------
+// Two encodings turn up in COBRA SBML files and flux tables:
+// - cobrapy writes ids as prefix + id, with every character outside [A-Za-z0-9_]
+//   escaped as __<char code>__ (P_C00001[m] -> M_P_C00001__91__m__93__) and dots
+//   in gene ids as __SBML_DOT__. cobrapy undoes both when it reads a file.
+// - The COBRA Toolbox (and early cobrapy) spelled characters as tokens such as
+//   _PERIOD_ or _LSQBKT_. Current cobrapy leaves those as they are.
+
+const COBRA_CODE = /__(\d+)__/g;
+const HAS_COBRA = /__\d+__|__SBML_DOT__/;
+const LEGACY = {
+  _DASH_: '-', _FSLASH_: '/', _BSLASH_: '\\', _LPAREN_: '(', _RPAREN_: ')',
+  _LSQBKT_: '[', _RSQBKT_: ']', _COMMA_: ',', _PERIOD_: '.', _APOS_: "'",
+};
+const LEGACY_TOKEN = new RegExp(Object.keys(LEGACY).join('|'), 'g');
+const HAS_LEGACY = new RegExp(Object.keys(LEGACY).join('|'));
+
+export function cobraDecode(id, prefix) {
+  const s = id
+    .replace(/__SBML_DOT__/g, '.')
+    .replace(COBRA_CODE, (code, n) => (Number(n) <= 0x10FFFF ? String.fromCodePoint(Number(n)) : code));
+  return s.startsWith(prefix) ? s.slice(prefix.length) : s;
+}
+
+export function legacyDecode(id) {
+  return id.replace(LEGACY_TOKEN, t => LEGACY[t]);
+}
+
+// How many model ids carry each encoding. M_ / R_ on every species and
+// reaction also marks a cobrapy file, even without any codes.
+export function findEncodings(model) {
+  const sp = [...model.species.keys()];
+  const rx = [...model.reactions.keys()];
+  const all = [...sp, ...rx];
+  const prefixed = sp.every(id => id.startsWith('M_')) && rx.every(id => id.startsWith('R_'));
+  return {
+    cobra: prefixed ? all.length : all.filter(id => HAS_COBRA.test(id)).length,
+    legacy: all.filter(id => HAS_LEGACY.test(id)).length,
+  };
+}
+
+// The same for the reaction ids of a flux table.
+export function findFluxEncodings(ids) {
+  let cobra = 0;
+  let legacy = 0;
+  for (const id of ids) {
+    if (HAS_COBRA.test(id) || id.startsWith('R_')) cobra++;
+    if (HAS_LEGACY.test(id)) legacy++;
+  }
+  return { cobra, legacy };
+}
+
+// Decode one id space layer by layer. Where a layer would make two ids equal,
+// it is skipped for the ids it changed (an id it left alone keeps its form),
+// so every id stays unique. Such ids get `clash` = { layer, with, as }; the id
+// they would have equalled lists them in `clashedBy`. Ids that clashed share
+// a `group` (`space` + number), so they can be listed together.
+function decodeIds(items, layers, space) {
+  const entries = items.map(({ id, kind, prefix }) => ({ kind, prefix, raw: id, shown: id, applied: [], clash: null, clashedBy: [], group: null }));
+  const parent = entries.map((_, i) => i);
+  const root = i => (parent[i] === i ? i : (parent[i] = root(parent[i])));
+  for (const layer of layers) {
+    const before = entries.map(e => e.shown);
+    entries.forEach(e => {
+      const d = layer.decode(e);
+      if (d !== e.shown) {
+        e.shown = d;
+        e.applied.push(layer.name);
+      }
+    });
+    for (let undone = true; undone;) {
+      undone = false;
+      const byShown = new Map();
+      entries.forEach((e, i) => (byShown.get(e.shown) || byShown.set(e.shown, []).get(e.shown)).push(i));
+      for (const group of byShown.values()) {
+        if (group.length < 2) continue;
+        const keeper = group.find(i => entries[i].shown === before[i]) ?? group[0];
+        for (const i of group) parent[root(i)] = root(group[0]);
+        for (const i of group) {
+          const e = entries[i];
+          if (e.shown === before[i]) continue;
+          const other = entries[keeper === i ? group.find(j => j !== i) : keeper];
+          e.clash = { layer: layer.name, with: other.raw, as: e.shown };
+          other.clashedBy.push(e.raw);
+          e.shown = before[i];
+          e.applied.pop();
+          undone = true;
+        }
+      }
+    }
+  }
+  const size = new Map();
+  entries.forEach((_, i) => size.set(root(i), (size.get(root(i)) || 0) + 1));
+  entries.forEach((e, i) => { if (size.get(root(i)) > 1) e.group = `${space}:${root(i)}`; });
+  return entries;
+}
+
+// The model with species, reaction and gene ids decoded, plus one entry per
+// id for the ID decoding table. Species and reactions share one id space in
+// the graph, so they are checked for clashes together.
+export function decodeModelIds(model, { cobra = true, legacy = true } = {}) {
+  const layers = [];
+  if (cobra) layers.push({ name: 'cobrapy', decode: e => cobraDecode(e.shown, e.prefix) });
+  if (legacy) layers.push({ name: 'COBRA Toolbox', decode: e => legacyDecode(e.shown) });
+  const nodes = decodeIds([
+    ...[...model.species.keys()].map(id => ({ id, kind: 'species', prefix: 'M_' })),
+    ...[...model.reactions.keys()].map(id => ({ id, kind: 'reaction', prefix: 'R_' })),
+  ], layers, 'node');
+  const geneIds = [...new Set([...model.reactions.values()].flatMap(r => r.genes))];
+  const genes = decodeIds(geneIds.map(id => ({ id, kind: 'gene', prefix: 'G_' })), layers, 'gene');
+  const entries = [...nodes, ...genes];
+  if (entries.every(e => e.raw === e.shown)) return { model, entries };
+
+  const ids = new Map(nodes.map(e => [e.raw, e.shown]));
+  const geneMap = new Map(genes.map(e => [e.raw, e.shown]));
+  const to = id => ids.get(id) ?? id;
+  const refs = list => list.map(ref => ({ ...ref, species: to(ref.species) }));
+  const species = new Map();
+  for (const sp of model.species.values()) {
+    const id = to(sp.id);
+    species.set(id, { ...sp, id, name: sp.name === sp.id ? id : sp.name });
+  }
+  const reactions = new Map();
+  for (const r of model.reactions.values()) {
+    const id = to(r.id);
+    reactions.set(id, {
+      ...r, id, name: r.name === r.id ? id : r.name,
+      reactants: refs(r.reactants), products: refs(r.products), modifiers: refs(r.modifiers),
+      genes: r.genes.map(g => geneMap.get(g) ?? g),
+    });
+  }
+  const groups = (model.groups || []).map(g => ({ ...g, members: g.members.map(to) }));
+  return { model: { ...model, species, reactions, groups }, entries };
+}
+
 // Many models encode the compartment as an id suffix (GLN_p, M_atp_c).
 export function compartmentFromId(id) {
   const i = id.lastIndexOf('_');
@@ -288,18 +423,45 @@ export function parseFluxCSV(text) {
   return { rows, bad };
 }
 
-// Match flux ids to reactions, tolerating the common `R_` prefix mismatch
-// between COBRA exports and SBML ids.
-export function matchFlux(model, rows) {
-  const flux = new Map();
-  const unmatched = [];
-  for (const [id, v] of rows) {
-    const candidates = [id, 'R_' + id, id.startsWith('R_') ? id.slice(2) : null];
-    const hit = candidates.find(c => c && model.reactions.has(c));
-    if (hit) flux.set(hit, v);
-    else unmatched.push(id);
+// Match flux ids to reactions: as shown ('exact'), as written in the SBML file
+// ('sbml'), either with or without the R_ prefix ('prefix'), then with both
+// encodings decoded on both sides ('decoded'). A decoded id that fits several
+// reactions matches none of them and is reported ambiguous.
+// `sbmlId` maps a shown reaction id back to the id in the SBML file.
+export function matchFlux(model, rows, sbmlId = id => id) {
+  const canon = id => legacyDecode(cobraDecode(id, 'R_'));
+  const byRaw = new Map();
+  const byCanon = new Map();
+  for (const id of model.reactions.keys()) {
+    const raw = sbmlId(id);
+    byRaw.set(raw, id);
+    const c = canon(raw);
+    (byCanon.get(c) || byCanon.set(c, []).get(c)).push(id);
   }
-  return { flux, unmatched };
+  const find = id => (model.reactions.has(id) ? [id, 'exact'] : byRaw.has(id) ? [byRaw.get(id), 'sbml'] : null);
+  const flux = new Map();
+  const entries = [];
+  for (const [id, v] of rows) {
+    let hit = find(id);
+    if (!hit) {
+      hit = find('R_' + id) || (id.startsWith('R_') ? find(id.slice(2)) : null);
+      if (hit?.[1] === 'exact') hit[1] = 'prefix';
+    }
+    let [reaction, how] = hit || [null, null];
+    let candidates = null;
+    if (!reaction) {
+      how = 'decoded';
+      const hits = byCanon.get(canon(id)) || [];
+      if (hits.length === 1) reaction = hits[0];
+      else if (hits.length > 1) candidates = hits;
+    }
+    if (reaction) flux.set(reaction, v);
+    entries.push({
+      id, v, reaction: reaction || null, how: reaction ? how : null, candidates,
+      status: reaction ? 'matched' : candidates ? 'ambiguous' : 'unmatched',
+    });
+  }
+  return { flux, entries, unmatched: entries.filter(e => !e.reaction).map(e => e.id) };
 }
 
 // Stable key for remembering layouts per model.

@@ -33,7 +33,17 @@ and switching back restores that layout instead of recomputing it.
 
 - **SBML** (L2/L3, FBC bounds and reversibility are read). Drop the file anywhere or use *Open model…*.
 - **Flux CSV**: `reaction_id,flux` per row (comma, semicolon or tab; header optional).
-  IDs match with or without the `R_` prefix.
+  IDs match as shown, as written in the SBML file, with or without the `R_` prefix, or once both
+  encodings below are decoded on both sides. A row that fits several reactions only after
+  decoding is skipped and reported.
+- **ID decoding** (the *ID decoding* tab): two encodings are detected and decoded automatically.
+  - cobrapy: `M_`/`R_`/`G_` prefixes and characters as codes (`M_P_C00001__91__m__93__` → `P_C00001[m]`),
+    the way cobrapy shows IDs after loading.
+  - COBRA Toolbox: tokens such as `_PERIOD_`, `_DASH_`, `_LSQBKT_`. Current cobrapy keeps these, so
+    untick this one to see IDs exactly as cobrapy does.
+
+  Where a decoding step would make two IDs equal, it is skipped for the ID it would change; the tab
+  lists every ID before and after, with clashes and unmatched flux rows under *Problems*.
 
 ## Layout
 

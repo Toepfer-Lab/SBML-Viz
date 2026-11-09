@@ -46,11 +46,20 @@ export function compartmentStyles(model) {
   return styles;
 }
 
-// Species that differ only by compartment share a base key (PROTON_c, PROTON_p -> PROTON).
+// Species that differ only by compartment share a base key: PROTON_c and
+// PROTON_p -> PROTON. The compartment is matched as an id suffix, either by its
+// full id or by its last part (compartment H_p, species H_PROTON_p), written
+// as _p, [p] or [p] escaped by cobrapy or the COBRA Toolbox.
 export function baseKey(sp) {
-  let id = sp.id;
-  if (sp.compartment && id.endsWith('_' + sp.compartment)) id = id.slice(0, -(sp.compartment.length + 1));
-  return id.replace(/^M_/, '');
+  const id = sp.id.replace(/^M_/, '');
+  const c = sp.compartment || '';
+  for (const code of new Set([c, c.slice(c.lastIndexOf('_') + 1)])) {
+    if (!code) continue;
+    for (const suffix of [`_${code}`, `[${code}]`, `__91__${code}__93__`, `_LSQBKT_${code}_RSQBKT_`]) {
+      if (id.length > suffix.length && id.endsWith(suffix)) return id.slice(0, -suffix.length);
+    }
+  }
+  return id;
 }
 
 export function buildIndex(model) {

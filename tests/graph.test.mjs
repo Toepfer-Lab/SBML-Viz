@@ -153,3 +153,14 @@ test('path finding respects direction and avoids side metabolites', async () => 
   assert.equal(back.undirected, true);
   assert.equal(findPath(m, idx, new Map(), 'A_c', 'A_c', { side }), null);
 });
+
+test('base keys strip the compartment in the forms real models use', () => {
+  const key = (id, compartment) => baseKey({ id, compartment });
+  assert.equal(key('M_atp_c', 'c'), 'atp');
+  assert.equal(key('M_H_PROTON_p', 'H_p'), 'H_PROTON');         // compartment H_p, suffix _p
+  assert.equal(key('P_C00001[m]', 'P_m'), 'P_C00001');          // decoded cobrapy
+  assert.equal(key('M_P_C00001__91__m__93__', 'P_m'), 'P_C00001'); // as written by cobrapy
+  assert.equal(key('glc_LSQBKT_e_RSQBKT_', 'e'), 'glc');         // COBRA Toolbox tokens
+  assert.equal(key('c', 'c'), 'c');                               // never strips to nothing
+  assert.equal(key('M_glc_e', 'c'), 'glc_e');                     // other compartment: kept
+});

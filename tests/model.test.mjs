@@ -66,3 +66,88 @@ test('parseRef handles legacy and current identifiers.org forms', () => {
   assert.equal(parseRef('https://identifiers.org/biocyc/META:ATP').id, 'META:ATP');
   assert.equal(parseRef('https://www.ebi.ac.uk/chebi/x').db, 'www.ebi.ac.uk');
 });
+
+test('both encodings decode like cobrapy and the COBRA Toolbox wrote them', async () => {
+  const { cobraDecode, legacyDecode } = await import('../js/model.js');
+  assert.equal(cobraDecode('M_P_C00001__91__m__93__', 'M_'), 'P_C00001[m]');
+  assert.equal(cobraDecode('R_H_1__46__5__46__1__46__34_RXN_c', 'R_'), 'H_1.5.1.34_RXN_c');
+  assert.equal(cobraDecode('G_At1g01__SBML_DOT__1', 'G_'), 'At1g01.1');
+  assert.equal(cobraDecode('H_1_PERIOD_10_RXN', 'R_'), 'H_1_PERIOD_10_RXN'); // cobrapy keeps tokens
+  assert.equal(legacyDecode('H_1_PERIOD_10_PERIOD_2_RXN'), 'H_1.10.2_RXN');
+  assert.equal(legacyDecode('glc_DASH_D_LSQBKT_c_RSQBKT_'), 'glc-D[c]');
+});
+
+const sp = (id, compartment = 'm') => [id, { id, name: id, compartment, refs: [], notes: {} }];
+const rxn = (id, reactants, products = [], genes = []) => [id, {
+  id, name: id, reversible: false,
+  reactants: reactants.map(species => ({ species, stoich: 1 })), products: products.map(species => ({ species, stoich: 1 })),
+  modifiers: [], genes,
+}];
+
+test('decoding renames the whole model and flux matches in every form', async () => {
+  const { findEncodings, decodeModelIds, matchFlux } = await import('../js/model.js');
+  const raw = {
+    id: 'm', species: new Map([sp('M_A__91__m__93__'), sp('M_B__91__m__93__')]),
+    reactions: new Map([rxn('R_X__46__1', ['M_A__91__m__93__'], ['M_B__91__m__93__'], ['G_g1__SBML_DOT__2']), rxn('R_Y_PERIOD_2', ['M_B__91__m__93__'])]),
+    groups: [{ id: 'g', name: 'g', members: ['R_X__46__1'] }],
+  };
+  assert.deepEqual(findEncodings(raw), { cobra: 4, legacy: 1 });
+  const { model, entries } = decodeModelIds(raw);
+  assert.deepEqual([...model.reactions.keys()], ['X.1', 'Y.2']);
+  assert.deepEqual(entries.find(e => e.raw === 'R_Y_PERIOD_2').applied, ['cobrapy', 'COBRA Toolbox']);
+  const r = model.reactions.get('X.1');
+  assert.equal(r.name, 'X.1');
+  assert.deepEqual(r.reactants.map(x => x.species), ['A[m]']);
+  assert.deepEqual(r.genes, ['g1.2']);
+  assert.deepEqual(model.groups[0].members, ['X.1']);
+  // cobrapy-only keeps the token, as cobrapy shows it.
+  assert.ok(decodeModelIds(raw, { legacy: false }).model.reactions.has('Y_PERIOD_2'));
+  const sbml = new Map([['X.1', 'R_X__46__1'], ['Y.2', 'R_Y_PERIOD_2']]);
+  const { entries: rows } = matchFlux(model, [['X.1', 1], ['R_X__46__1', 1], ['Y_PERIOD_2', 2], ['Y__46__2', 2], ['Z', 0]], id => sbml.get(id));
+  assert.deepEqual(rows.map(e => [e.reaction, e.how, e.status]), [
+    ['X.1', 'exact', 'matched'], ['X.1', 'sbml', 'matched'], ['Y.2', 'sbml', 'matched'], ['Y.2', 'decoded', 'matched'], [null, null, 'unmatched'],
+  ]);
+});
+
+test('a decoding layer is skipped only for the ids it would make clash', async () => {
+  const { decodeModelIds, matchFlux } = await import('../js/model.js');
+  // As in a real model: H_6_PERIOD_2 and H_6__46__2 both decode to H_6.2.
+  const raw = {
+    id: 'm', species: new Map([sp('M_ATP', 'c'), sp('M_glc', 'c')]),
+    reactions: new Map([rxn('R_ATP', ['M_glc']), rxn('R_H_6_PERIOD_2', ['M_glc']), rxn('R_H_6__46__2', ['M_glc'])]),
+  };
+  const { model, entries } = decodeModelIds(raw);
+  const by = id => entries.find(e => e.raw === id);
+  // Species ATP and reaction ATP would share an id: both keep their SBML form.
+  assert.ok(model.species.has('M_ATP') && model.reactions.has('R_ATP'));
+  assert.equal(by('M_ATP').clash.layer, 'cobrapy');
+  assert.equal(model.reactions.get('R_ATP').reactants[0].species, 'glc');
+  // Only the COBRA Toolbox step is undone, and only for the id it changed.
+  assert.equal(by('R_H_6_PERIOD_2').shown, 'H_6_PERIOD_2');
+  assert.deepEqual(by('R_H_6_PERIOD_2').clash, { layer: 'COBRA Toolbox', with: 'R_H_6__46__2', as: 'H_6.2' });
+  assert.equal(by('R_H_6__46__2').shown, 'H_6.2');
+  assert.deepEqual(by('R_H_6__46__2').clashedBy, ['R_H_6_PERIOD_2']);
+  // Each of the pair still matches its own flux row.
+  const sbml = new Map(entries.map(e => [e.shown, e.raw]));
+  const rows = matchFlux(model, [['H_6_PERIOD_2', 1], ['H_6.2', 2]], id => sbml.get(id)).entries;
+  assert.deepEqual(rows.map(e => e.reaction), ['H_6_PERIOD_2', 'H_6.2']);
+  // Shown as written, a flux id that fits both only once decoded matches neither.
+  const plain = decodeModelIds(raw, { cobra: false, legacy: false }).model;
+  const amb = matchFlux(plain, [['H_6.2', 1]]).entries[0];
+  assert.equal(amb.status, 'ambiguous');
+  assert.deepEqual(amb.candidates, ['R_H_6_PERIOD_2', 'R_H_6__46__2']);
+});
+
+test('ids that clash share a group, whichever side they are on', async () => {
+  const { decodeModelIds } = await import('../js/model.js');
+  const raw = {
+    id: 'm', species: new Map([sp('M_glc', 'c')]),
+    reactions: new Map([rxn('R_A_PERIOD_1', ['M_glc']), rxn('R_A__46__1', ['M_glc']), rxn('R_A_DASH_1', ['M_glc']), rxn('R_B', ['M_glc'])]),
+  };
+  const { entries } = decodeModelIds(raw);
+  const group = id => entries.find(e => e.raw === id).group;
+  assert.ok(group('R_A_PERIOD_1'));
+  assert.equal(group('R_A_PERIOD_1'), group('R_A__46__1'));
+  assert.equal(group('R_A_DASH_1'), null); // A-1 clashes with nothing
+  assert.equal(group('R_B'), null);
+});
