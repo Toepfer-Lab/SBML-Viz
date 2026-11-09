@@ -402,7 +402,7 @@ export function createView3D(el, { onNodeClick, onFrozen, options }) {
     dims: 3,
     get live() { return layout.live; },
     qualityText: () => (s.quality === 'auto' ? `auto: ${effective}` : effective),
-    setData(graph, { styles, live, fluxT }) {
+    setData(graph, { styles, fluxT }) {
       const old = new Map(s.graph.nodes.map(n => [n.id, n]));
       const degree = degrees(graph);
       for (const n of graph.nodes) {
@@ -427,7 +427,7 @@ export function createView3D(el, { onNodeClick, onFrozen, options }) {
       lowFpsSeconds = 0;
       chooseQuality();
       Graph.graphData(graph);
-      layout.afterData(fresh, live || fresh.length === graph.nodes.length);
+      layout.afterData(fresh);
       buildBatches();
       buildOverlay();
       updateGrid();

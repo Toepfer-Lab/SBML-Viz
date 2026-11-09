@@ -1,18 +1,32 @@
-// Live / frozen layout shared by the 2D and 3D views.
+// Frozen layout shared by the 2D and 3D views.
 //
-// Live: forces run until the simulation settles, then the layout freezes.
+// Whole layouts are computed in layout-worker.js before the graph is drawn.
 // Frozen: every node is pinned (fx/fy/fz) and the forces are removed, so a
-// drag moves only the dragged node and it stays where it is dropped. Nodes
-// that appear later (scope or filter changes) settle around the pinned ones.
+// drag moves only the dragged node and it stays where it is dropped. A few
+// nodes that appear later (scope or filter changes) settle around the pinned
+// ones. Live (Run forces): all nodes move on screen. Both end when the
+// simulation runs out of energy, then everything is frozen again.
 import { endId } from './style.js';
 
-const FORCES = ['charge', 'link', 'center', 'cluster'];
+const FORCE_NAMES = ['charge', 'link', 'center', 'cluster'];
+
+// d3's default end of a simulation: about 300 ticks from alpha 1.
+export const ALPHA_MIN = 0.001;
+
+// Force settings per view mode, shared by the views (placing new nodes among
+// pinned ones) and the layout worker (whole layouts).
+export const FORCES = {
+  2: { charge: n => (n.kind === 'side' ? -15 : -80), distance: l => (l.side ? 10 : 34), strength: l => (l.side ? 1 : 0.5) },
+  3: { charge: () => -40, distance: l => (l.side ? 6 : 18), strength: null },
+};
 
 export function createLayoutControl(Graph, { dims, onFrozen }) {
   const coords = dims === 3 ? ['x', 'y', 'z'] : ['x', 'y'];
   let saved = null;
-  let live = true;
-  let settlingFresh = false;
+  let live = false;
+  let settling = false;
+  // Stop on energy, not on time; the cooldown below is only a safety net.
+  Graph.d3AlphaMin(ALPHA_MIN);
 
   const nodes = () => Graph.graphData().nodes;
   const pin = n => { for (const c of coords) n['f' + c] = n[c]; };
@@ -20,7 +34,7 @@ export function createLayoutControl(Graph, { dims, onFrozen }) {
 
   function forcesOff() {
     if (saved) return;
-    saved = FORCES.map(k => [k, Graph.d3Force(k)]).filter(([, f]) => f);
+    saved = FORCE_NAMES.map(k => [k, Graph.d3Force(k)]).filter(([, f]) => f);
     for (const [k] of saved) Graph.d3Force(k, null);
   }
 
@@ -36,7 +50,7 @@ export function createLayoutControl(Graph, { dims, onFrozen }) {
 
   function freeze() {
     live = false;
-    settlingFresh = false;
+    settling = false;
     nodes().forEach(pin);
     forcesOff();
     Graph.cooldownTime(600);
@@ -53,18 +67,11 @@ export function createLayoutControl(Graph, { dims, onFrozen }) {
       live = true;
       nodes().forEach(unpin);
       forcesOn();
-      Graph.cooldownTime(15000);
+      Graph.cooldownTime(600000);
       Graph.d3ReheatSimulation();
     },
     // Call right after graphData(). `fresh` = nodes that had no position.
-    afterData(fresh, startLive) {
-      if (startLive) {
-        live = true;
-        nodes().forEach(unpin);
-        forcesOn();
-        Graph.cooldownTime(15000);
-        return;
-      }
+    afterData(fresh) {
       live = false;
       const freshSet = new Set(fresh);
       for (const n of nodes()) {
@@ -72,9 +79,9 @@ export function createLayoutControl(Graph, { dims, onFrozen }) {
         else pin(n);
       }
       if (fresh.length) {
-        settlingFresh = true;
+        settling = true;
         forcesOn();
-        Graph.cooldownTime(4000);
+        Graph.cooldownTime(60000);
       } else {
         forcesOff();
         Graph.cooldownTime(600);
@@ -84,7 +91,7 @@ export function createLayoutControl(Graph, { dims, onFrozen }) {
       if (live) {
         freeze();
         onFrozen?.('settled');
-      } else if (settlingFresh) {
+      } else if (settling) {
         freeze();
         onFrozen?.('placed');
       } else {

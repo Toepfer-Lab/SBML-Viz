@@ -22,12 +22,16 @@ Then open <http://localhost:8000>.
 
 ## Layout
 
-Forces run until the layout settles, then it freezes: every node is pinned,
-and dragging moves only that node. The *Layout frozen / Forces running*
-button in the view starts or stops the simulation. 2D and 3D are independent:
-each generates its own layout with its own forces the first time it is shown,
-and switching back restores that layout instead of recomputing it.
-*Save layout* stores both in the browser.
+A layout is computed in a Web Worker before the graph is drawn, until the
+simulation runs out of energy. Meanwhile the graph area shows progress and is
+locked, while the side panels stay usable; *Stop now* shows the layout as far
+as it got. Once drawn, the layout is frozen: every node is pinned, and dragging
+moves only that node. *Run forces* runs the forces again on screen, from where
+the graph is. A few nodes added later (a growing neighbourhood) settle on
+screen too; many added at once are laid out in the worker around the others.
+
+2D and 3D are independent: each gets its own layout the first time it is
+shown, and switching back restores it. *Save layout* stores both in the browser.
 
 ## Input
 
@@ -52,7 +56,8 @@ and switching back restores that layout instead of recomputing it.
 | `js/model.js` | SBML parser (no DOM; annotations, notes, genes, groups), flux CSV parser, bundled-example converter |
 | `js/parse-worker.js` | Runs the SBML parser in a Web Worker with progress |
 | `js/graph.js` | Pure graph building: scope/hops, side metabolites, flux threshold, compartments; path finding |
-| `js/layout.js` | Live / frozen layout and placement of new nodes, shared by both views |
+| `js/layout.js` | Force settings, frozen layout and placement of a few new nodes, shared by both views |
+| `js/layout-worker.js` | Computes layouts off the main thread until the simulation runs out of energy |
 | `js/view.js` | 3D overview: 3d-force-graph for layout and picking, batched (instanced) three.js drawing |
 | `js/view2d.js` | 2D reaction map: force-graph canvas rendering |
 | `js/style.js` | Shared visual language (colors, flux scale, cluster force) |

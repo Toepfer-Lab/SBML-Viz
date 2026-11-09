@@ -141,6 +141,14 @@
 
     <main class="viewport">
       <div id="graph"></div>
+      <div class="layout-busy" id="layout-busy" role="status" aria-live="polite" hidden>
+        <div class="layout-busy-card">
+          <div class="layout-busy-head"><span class="strong" id="layout-busy-text"></span><span class="mono muted" id="layout-busy-pct"></span></div>
+          <div class="progress-track"><span id="layout-busy-fill"></span></div>
+          <span class="muted small">The graph appears once the simulation has run out of energy. The side panels and settings stay usable.</span>
+          <button class="btn small" id="layout-stop" type="button">Stop now and show it</button>
+        </div>
+      </div>
 
       <div class="overlay-top">
         <div class="pill">
@@ -261,7 +269,7 @@
           <button class="switch" role="switch" data-key="drag">Drag nodes</button>
           <button class="switch" role="switch" data-key="cluster">Pull compartments into clusters</button>
           <button class="switch only-3d" role="switch" data-key="grid">Floor grid</button>
-          <span class="muted small">Forces run until the layout settles, then it freezes: dragging moves only that node. Use the layout button in the view to run forces again.</span>
+          <span class="muted small">A layout is computed before the graph is drawn and frozen once the simulation has run out of energy: dragging moves only that node. <em>Run forces</em> in the view runs the forces again on screen.</span>
         </div>
 
         <div class="stack-10">

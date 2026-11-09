@@ -2,7 +2,7 @@ import { parseSBML, modelFromGraphJSON, parseFluxCSV, matchFlux, modelKey, findE
 import { FLUX_EPS, fluxDomain, inFluxRange, buildIndex, buildGraph, compartmentStyles, detectSide, speciesSummary, sideKeyOf, findPath } from './graph.js';
 import { createView3D } from './view.js';
 import { createView2D } from './view2d.js';
-import { fluxScale, escapeHtml } from './style.js';
+import { fluxScale, escapeHtml, endId } from './style.js';
 import * as ui from './ui.js';
 
 const $ = id => document.getElementById(id);
@@ -43,7 +43,8 @@ const state = {
   particles: 'focus',
   quality: 'auto',
   dims: 3,
-  live: true,              // forces running; freezes once the layout settles
+  layingOut: false,        // a layout is being computed; the graph area is locked meanwhile
+  live: false,             // Run forces: the layout moves on screen until it runs out of energy
   drag: true,
   cluster: true,
   grid: true,
@@ -131,7 +132,6 @@ function loadModel(raw, fluxRows, fileName, { quiet = false, keep = null } = {})
   state.scope = keep?.scope === 'hood' && state.focus ? 'hood' : 'whole';
   state.path = null;
   state.showCut = false;
-  state.live = !Object.keys(layouts[state.dims]).length;
 
   $('import').hidden = true;
   $('app').hidden = false;
@@ -270,6 +270,10 @@ async function loadExample() {
 
 // --- graph ----------------------------------------------------------------------
 
+// Builds the graph for the current state and shows it. Nodes take their
+// position from the mode's own layout (2D and 3D are independent). A graph
+// with no layout yet, or with many new nodes, is laid out in the worker first;
+// a few new nodes settle in the view.
 function rebuild() {
   // Remember where everything is before the graph changes.
   if (view) storePositions();
@@ -288,25 +292,139 @@ function rebuild() {
   state.hiddenByFlux = graph.hiddenByFlux;
   if (state.selected && !graph.nodes.some(n => n.id === state.selected)) state.selected = null;
 
-  // 2D and 3D are independent: each mode seeds only from its own layout, and
-  // a mode never laid out generates one with its own forces.
-  layoutIds = new Map(graph.nodes.map(n => [n.id, layoutId(n)]));
+  const ids = new Map(graph.nodes.map(n => [n.id, layoutId(n)]));
   const own = layouts[state.dims];
-  const hasOwn = graph.nodes.some(n => own[layoutIds.get(n.id)]);
+  let fresh = 0;
   for (const n of graph.nodes) {
-    const p = own[layoutIds.get(n.id)];
-    if (!p) continue;
+    const p = own[ids.get(n.id)];
+    if (!p) {
+      fresh++;
+      continue;
+    }
     n.x = p[0];
     n.y = p[1];
     if (state.dims === 3) n.z = p[2];
   }
-  if (!hasOwn) state.live = true;
+  state.live = false;
+  if (graph.nodes.length && (fresh === graph.nodes.length || fresh > SETTLE_IN_VIEW)) {
+    layOut(graph, ids);
+  } else {
+    cancelLayout();
+    show(graph, ids);
+  }
+}
 
+function show(graph, ids) {
+  layoutIds = ids;
   const fluxT = fluxScale(graph.links, state.fluxScaleMode === 'model' ? state.fluxDomain : null);
   state.colorRange = fluxT.range;
-  view.setData(graph, { styles: state.styles, live: state.live, fluxT });
+  view.setData(graph, { styles: state.styles, fluxT });
   view.setSelection(state.selected);
   view.setHighlight(state.scope === 'path' && state.path ? state.path.ids : null);
+  renderLayoutToggle();
+}
+
+// --- layout worker -------------------------------------------------------------------
+// Layouts are computed in layout-worker.js before the graph is drawn. Meanwhile
+// the graph area is locked and shows progress; the panels stay usable. A newer
+// layout replaces a running one.
+
+const SETTLE_IN_VIEW = 300; // up to this many new nodes settle in the view instead
+let layoutWorker = null;
+let layoutWorkerFailed = false;
+let pendingLayout = null;   // { job, graph, ids, dims }
+let layoutJobs = 0;
+
+function layOut(graph, ids) {
+  if (layoutWorkerFailed) {
+    show(graph, ids);
+    return;
+  }
+  layoutWorker ??= createLayoutWorker();
+  if (pendingLayout) layoutWorker.postMessage({ job: pendingLayout.job, stop: true });
+  const job = ++layoutJobs;
+  pendingLayout = { job, graph, ids, dims: state.dims };
+  layoutWorker.postMessage({
+    job, dims: state.dims, cluster: state.cluster,
+    // Nodes that already have a position (a graph that grew) stay where they are.
+    nodes: graph.nodes.map(n => ({
+      id: n.id, kind: n.kind, compartment: n.compartment,
+      ...(n.x === undefined ? {} : { x: n.x, y: n.y, z: n.z }),
+    })),
+    links: graph.links.map(l => ({ source: endId(l.source), target: endId(l.target), side: l.side })),
+  });
+  setLayingOut(true, graph.nodes.length, 0);
+}
+
+function createLayoutWorker() {
+  const worker = new Worker(new URL('./layout-worker.js', import.meta.url), { type: 'module' });
+  worker.onmessage = ({ data }) => {
+    const p = pendingLayout;
+    if (!p || data.job !== p.job) return;
+    if (data.type === 'progress') {
+      setLayingOut(true, p.graph.nodes.length, data.fraction);
+      return;
+    }
+    pendingLayout = null;
+    for (const n of p.graph.nodes) {
+      const [x, y, z] = data.positions[n.id];
+      n.x = x;
+      n.y = y;
+      if (p.dims === 3) n.z = z;
+    }
+    finishLayout(p);
+  };
+  // Without the worker (it could not load), layouts settle in the view.
+  worker.onerror = e => {
+    e.preventDefault();
+    layoutWorkerFailed = true;
+    toast('The background layout could not start, so the graph settles on screen instead.', true);
+    const p = pendingLayout;
+    pendingLayout = null;
+    if (p) finishLayout(p);
+  };
+  return worker;
+}
+
+function finishLayout({ graph, ids, dims }) {
+  setLayingOut(false);
+  if (dims !== state.dims) return;
+  show(graph, ids);
+  storePositions();
+  setTimeout(() => view.fit(), 50);
+  renderAll();
+}
+
+function cancelLayout() {
+  if (!pendingLayout) return;
+  layoutWorker.postMessage({ job: pendingLayout.job, stop: true });
+  pendingLayout = null;
+  setLayingOut(false);
+}
+
+// "Stop now": the worker answers with the positions it has, which are shown.
+function stopLayout() {
+  if (pendingLayout) layoutWorker.postMessage({ job: pendingLayout.job, stop: true });
+}
+
+// Run forces / Freeze: the layout moves on screen until it runs out of energy.
+function setLive(on) {
+  state.live = on;
+  view.setLive(on);
+  if (!on) storePositions();
+  renderLayoutToggle();
+}
+
+function setLayingOut(on, count = 0, fraction = 0) {
+  state.layingOut = on;
+  $('layout-busy').hidden = !on;
+  // The graph and its controls are out of reach while the layout is computed.
+  for (const el of document.querySelectorAll('#graph, .overlay-top, .legend, .toolbar')) el.inert = on;
+  if (on) {
+    $('layout-busy-text').textContent = `Laying out ${count.toLocaleString('en')} nodes…`;
+    $('layout-busy-pct').textContent = `${Math.round(fraction * 100)}%`;
+    $('layout-busy-fill').style.width = `${fraction * 100}%`;
+  }
   renderLayoutToggle();
 }
 
@@ -323,12 +441,6 @@ function select(id, { fly = false, refocus = false } = {}) {
   renderScope();
 }
 
-function setLive(on) {
-  state.live = on;
-  view.setLive(on);
-  if (!on) storePositions();
-  renderLayoutToggle();
-}
 
 // --- path ---------------------------------------------------------------------------
 
@@ -419,11 +531,11 @@ function renderAll() {
 
 function renderLayoutToggle() {
   const b = $('layout-toggle');
-  b.setAttribute('aria-pressed', String(state.live));
-  $('layout-text').textContent = state.live ? 'Forces running · Freeze' : 'Layout frozen · Run forces';
+  b.setAttribute('aria-pressed', String(state.live || state.layingOut));
+  $('layout-text').textContent = state.layingOut ? 'Laying out…' : state.live ? 'Forces running · Freeze' : 'Layout frozen · Run forces';
   b.title = state.live
     ? 'Stop the simulation now and pin every node'
-    : 'Run the force simulation again; it freezes once the layout settles';
+    : 'Run the forces again from where the graph is; it freezes once the simulation runs out of energy';
 }
 
 function renderScope() {
@@ -543,7 +655,6 @@ function restoreLayout() {
   const both = saved.v === 2 ? saved : { 2: saved, 3: saved };
   layouts[2] = { ...both[2] };
   layouts[3] = { ...both[3] };
-  state.live = false;
   // A fresh view, so rebuild() does not fold the current positions back in.
   mountView(state.dims);
   rebuild();
@@ -615,11 +726,10 @@ function switchDims(dims) {
   storePositions();
   state.dims = dims;
   if (dims === 2) state.rotate = false;
-  // A mode with a saved layout opens frozen, exactly as it was left.
-  state.live = !Object.keys(layouts[dims]).length;
+  // A mode with a layout opens exactly as it was left; one without is laid out first.
   mountView(dims);
   rebuild();
-  setTimeout(() => view.fit(), state.live ? 1200 : 100);
+  if (!state.layingOut) setTimeout(() => view.fit(), 100);
 }
 
 // The 3D overview's call to action: drill into the selection as a 2D map.
@@ -662,6 +772,7 @@ function wire() {
   $('btn-restore').addEventListener('click', restoreLayout);
   $('btn-export').addEventListener('click', exportPng);
   $('layout-toggle').addEventListener('click', () => setLive(!state.live));
+  $('layout-stop').addEventListener('click', stopLayout);
 
   // Drag & drop anywhere. dragover must be cancelled or `drop` never fires.
   const overlay = $('drop-overlay');

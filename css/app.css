@@ -403,6 +403,19 @@ body.is-2d .only-3d, body:not(.is-2d) .only-2d { display: none !important; }
 .progress-track { width: 220px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .progress-track span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 120ms; }
 
+/* Layout being computed: covers and locks the graph area, not the panels. */
+.layout-busy {
+  position: absolute; inset: 0; z-index: 1; display: grid; place-items: center;
+  background: rgba(14, 16, 20, 0.82);
+}
+.layout-busy-card {
+  display: flex; flex-direction: column; gap: 10px; width: min(360px, calc(100% - 32px)); padding: 16px 18px;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--panel); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.layout-busy-head { display: flex; justify-content: space-between; gap: 12px; }
+.layout-busy .progress-track { width: 100%; }
+.layout-busy .btn { align-self: flex-start; }
+
 /* Layout live / frozen toggle */
 .layout-toggle {
   display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px;
