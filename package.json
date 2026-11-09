@@ -1,0 +1,10 @@
+{
+  "name": "sbml-viz",
+  "private": true,
+  "type": "module",
+  "description": "3D force-directed viewer for SBML metabolic models and flux distributions",
+  "scripts": {
+    "start": "python3 -m http.server 8000",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
