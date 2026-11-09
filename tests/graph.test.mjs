@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { modelFromGraphJSON, parseFluxCSV, matchFlux } from '../js/model.js';
-import { buildIndex, buildGraph, detectSide, speciesSummary, baseKey } from '../js/graph.js';
+import { buildIndex, buildGraph, detectSide, speciesSummary, baseKey, fluxDomain, inFluxRange } from '../js/graph.js';
+import { fluxScale } from '../js/style.js';
 
 // A -> R1 -> B -> R2 -> C, with H2O as a hub on every reaction.
 function toy() {
@@ -23,7 +24,7 @@ function toy() {
   return { id: 'toy', name: 'toy', species, reactions, compartments };
 }
 
-const base = { scope: 'whole', focus: null, hops: 1, sideMode: 'show', side: new Set(), threshold: 0, hiddenCompartments: new Set() };
+const base = { scope: 'whole', focus: null, hops: 1, sideMode: 'show', side: new Set(), fluxRange: null, hiddenCompartments: new Set() };
 
 test('whole model links follow written direction without flux', () => {
   const m = toy();
@@ -42,12 +43,32 @@ test('negative flux flips link direction and marks the reaction', () => {
   assert.equal(g.nodes.find(n => n.id === 'R2').flipped, true);
 });
 
-test('threshold hides low-flux reactions', () => {
+test('flux range hides reactions outside it', () => {
   const m = toy();
-  const flux = new Map([['R1', 1], ['R2', 1e-9], ['R3', 0]]);
-  const g = buildGraph(m, buildIndex(m), flux, { ...base, threshold: 1e-6 });
-  assert.deepEqual(g.nodes.filter(n => n.kind === 'rxn').map(n => n.id), ['R1']);
-  assert.equal(g.reactionsShown, 1);
+  const idx = buildIndex(m);
+  const flux = new Map([['R1', 1], ['R2', -50], ['R3', 0]]);
+  const shown = range => buildGraph(m, idx, flux, { ...base, fluxRange: range }).nodes.filter(n => n.kind === 'rxn').map(n => n.id);
+  assert.deepEqual(shown({ min: null, max: null, zero: false }), ['R1', 'R2']);
+  assert.deepEqual(shown({ min: 2, max: null, zero: false }), ['R2']);
+  assert.deepEqual(shown({ min: null, max: 10, zero: false }), ['R1']);
+  assert.deepEqual(shown({ min: 2, max: 10, zero: true }), ['R3']);
+});
+
+test('flux domain and zero flux ignore solver noise', () => {
+  const flux = new Map([['R1', 1e-12], ['R2', -0.5], ['R3', 20]]);
+  assert.deepEqual(fluxDomain(flux), [0.5, 20]);
+  assert.equal(fluxDomain(new Map([['R1', 0]])), null);
+  assert.equal(inFluxRange(1e-12, { min: null, max: null, zero: false }), false);
+  assert.equal(inFluxRange(undefined, { min: null, max: null, zero: true }), true);
+});
+
+test('colour scale can be fixed to the model range', () => {
+  const links = [{ v: 1 }, { v: 10 }, { v: 1e-12 }, { v: 0 }];
+  assert.equal(fluxScale(links)(10), 1);
+  assert.deepEqual(fluxScale(links).range, [1, 10]);
+  const fixed = fluxScale(links, [1, 100]);
+  assert.equal(fixed(10), 0.5);
+  assert.deepEqual(fixed.range, [1, 100]);
 });
 
 test('side metabolites can be duplicated per reaction or hidden', () => {
@@ -112,7 +133,7 @@ test('neighbourhood keeps the focus reactions below the cut-off, faint', async (
   const { buildIndex, buildGraph } = await import('../js/graph.js');
   const m = toy();
   const flux = new Map([['R1', 1e-9], ['R2', 1], ['R3', 1]]);
-  const opts = { ...base, scope: 'hood', focus: 'A_c', hops: 2, threshold: 1e-6 };
+  const opts = { ...base, scope: 'hood', focus: 'A_c', hops: 2, fluxRange: { min: 1e-6, max: null, zero: false } };
   const g = buildGraph(m, buildIndex(m), flux, opts);
   const r1 = g.nodes.find(n => n.id === 'R1');
   assert.equal(r1.belowCut, true);

@@ -1,7 +1,28 @@
 // Pure graph building: model + flux + view options -> { nodes, links } for
 // the force graph. No DOM or three.js here so it can be unit tested.
 
-export const THRESHOLDS = [0, 1e-6, 1e-3, 0.1, 1];
+// |v| below this counts as zero flux (solver noise).
+export const FLUX_EPS = 1e-9;
+
+// Smallest and largest non-zero |v|: the range of the flux filter.
+export function fluxDomain(flux) {
+  let lo = Infinity;
+  let hi = 0;
+  for (const v of flux.values()) {
+    const a = Math.abs(v);
+    if (a < FLUX_EPS) continue;
+    lo = Math.min(lo, a);
+    hi = Math.max(hi, a);
+  }
+  return hi ? [lo, hi] : null;
+}
+
+// range: { min, max, zero }. A null bound is open; `zero` keeps zero-flux reactions.
+export function inFluxRange(v, { min = null, max = null, zero = false }) {
+  const a = Math.abs(v || 0);
+  if (a < FLUX_EPS) return zero;
+  return (min === null || a >= min) && (max === null || a <= max);
+}
 
 // Known compartment ids -> label + color from the visual language.
 const KNOWN = {
@@ -72,11 +93,11 @@ export function sideKeyOf(model, speciesId) {
  * opts: {
  *   scope: 'whole' | 'hood', focus: node id | null, hops: number,
  *   sideMode: 'show' | 'dup' | 'hide', side: Set<baseKey>,
- *   threshold: number, hiddenCompartments: Set<id>,
- *   showCut: boolean,   // neighbourhood: include reactions below the threshold (drawn faint)
+ *   fluxRange: { min, max, zero } | null, hiddenCompartments: Set<id>,
+ *   showCut: boolean,   // neighbourhood: include reactions outside the flux range (drawn faint)
  *   path: [ids] | null, // scope 'path': species/reactions of a found path
  * }
- * Reactions below the flux threshold that are drawn anyway (the focus's own
+ * Reactions outside the flux range that are drawn anyway (the focus's own
  * reactions, or all of them with showCut) carry `belowCut: true`.
  */
 export function buildGraph(model, index, flux, opts) {
@@ -88,8 +109,8 @@ export function buildGraph(model, index, flux, opts) {
     return sp && !opts.hiddenCompartments.has(sp.compartment);
   };
   const reactionVisible = id => {
-    if (!hasFlux || !opts.threshold) return true;
-    return Math.abs(flux.get(id) || 0) >= opts.threshold;
+    if (!hasFlux || !opts.fluxRange) return true;
+    return inFluxRange(flux.get(id), opts.fluxRange);
   };
 
   // Which reactions (and, in neighbourhood scope, species) are in scope.
@@ -230,7 +251,7 @@ export function buildGraph(model, index, flux, opts) {
   let hiddenByFlux = cutByFlux.size;
   // In a neighbourhood the search stops at hidden reactions, so count what
   // the same neighbourhood would hold without the cut-off.
-  if (opts.scope === 'hood' && !opts.showCut && hasFlux && opts.threshold) {
+  if (opts.scope === 'hood' && !opts.showCut && hasFlux && opts.fluxRange) {
     hiddenByFlux = buildGraph(model, index, flux, { ...opts, showCut: true }).reactionsShown - totalShown;
   }
   return { nodes: [...nodes.values()], links, reactionsShown: totalShown, hiddenByFlux };

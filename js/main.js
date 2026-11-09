@@ -1,7 +1,8 @@
 import { parseSBML, modelFromGraphJSON, parseFluxCSV, matchFlux, modelKey } from './model.js';
-import { THRESHOLDS, buildIndex, buildGraph, compartmentStyles, detectSide, speciesSummary, sideKeyOf, findPath } from './graph.js';
+import { FLUX_EPS, fluxDomain, inFluxRange, buildIndex, buildGraph, compartmentStyles, detectSide, speciesSummary, sideKeyOf, findPath } from './graph.js';
 import { createView3D } from './view.js';
 import { createView2D } from './view2d.js';
+import { fluxScale } from './style.js';
 import * as ui from './ui.js';
 
 const $ = id => document.getElementById(id);
@@ -21,7 +22,12 @@ const state = {
   showCut: false,
   path: null,              // { ids, undirected } from findPath
   sideMode: 'dup',
-  threshold: 1,
+  fluxMin: null,           // |v| range shown; null = open end
+  fluxMax: null,
+  showZero: false,
+  fluxScaleMode: 'model',  // colour scale over the 'model' or the 'visible' flux
+  fluxDomain: null,        // [min, max] non-zero |v| in the model
+  colorRange: null,        // [min, max] the colour scale spans, for the legend
   labels: 'focus',
   particles: 'focus',
   quality: 'auto',
@@ -80,6 +86,7 @@ function loadModel(model, flux, fileName) {
   state.model = model;
   state.index = buildIndex(model);
   state.flux = flux || new Map();
+  resetFluxFilter();
   state.styles = compartmentStyles(model);
   state.fileName = fileName;
   state.side = new Set(detectSide(state.index));
@@ -117,6 +124,7 @@ function loadFlux(text, name) {
     return;
   }
   state.flux = flux;
+  resetFluxFilter();
   rebuild();
   renderAll();
   const notes = [];
@@ -220,7 +228,7 @@ function rebuild() {
     hops: state.hops,
     sideMode: state.sideMode,
     side: state.side,
-    threshold: THRESHOLDS[state.threshold],
+    fluxRange: fluxRange(),
     hiddenCompartments: state.hiddenCompartments,
     showCut: state.showCut,
     path: state.path?.ids || null,
@@ -242,7 +250,9 @@ function rebuild() {
   }
   if (!hasOwn) state.live = true;
 
-  view.setData(graph, { styles: state.styles, live: state.live });
+  const fluxT = fluxScale(graph.links, state.fluxScaleMode === 'model' ? state.fluxDomain : null);
+  state.colorRange = fluxT.range;
+  view.setData(graph, { styles: state.styles, live: state.live, fluxT });
   view.setSelection(state.selected);
   view.setHighlight(state.scope === 'path' && state.path ? state.path.ids : null);
   renderLayoutToggle();
@@ -282,7 +292,7 @@ function runPath() {
     side: state.side,
     hiddenCompartments: state.hiddenCompartments,
     weighted: $('path-weighted').checked,
-    threshold: THRESHOLDS[state.threshold] || 1e-6,
+    threshold: Math.max(state.fluxMin || 0, FLUX_EPS),
   });
   if (!error && !result) error = `No route from ${from} to ${to}, even ignoring reaction directions. Side metabolites and hidden compartments are skipped.`;
   if (error) {
@@ -339,9 +349,10 @@ function renderAll() {
   ui.renderSideList($('side-list'), [...state.side]);
   $('side-options').innerHTML = [...state.index.bases.keys()].filter(k => !state.side.has(k)).sort()
     .map(k => `<option value="${k.replace(/"/g, '&quot;')}">`).join('');
-  $('threshold-count').textContent = `${state.reactionsShown} of ${m.reactions.size}`;
-  const vs = [...state.flux.values()].map(Math.abs).filter(v => v > 0);
-  $('legend-max').textContent = vs.length ? ui.formatFlux(Math.max(...vs)) : '';
+  renderFluxFilter();
+  const [lo, hi] = state.colorRange || [];
+  $('legend-min').textContent = lo === undefined ? '' : ui.formatFlux(lo);
+  $('legend-max').textContent = hi === undefined ? '' : ui.formatFlux(hi);
 
   $('settings').hidden = !state.settingsOpen;
   $('btn-settings').setAttribute('aria-expanded', String(state.settingsOpen));
@@ -379,7 +390,7 @@ function renderScope() {
     toggle.disabled = false;
     if (state.hiddenByFlux || state.showCut) {
       cut.hidden = false;
-      cut.textContent = state.showCut ? 'Hide reactions below the cut-off' : `Show ${state.hiddenByFlux} below the |v| cut-off`;
+      cut.textContent = state.showCut ? 'Hide reactions outside the |v| range' : `Show ${state.hiddenByFlux} outside the |v| range`;
     }
   } else {
     $('scope-text').textContent = `Whole model · ${dim} overview`;
@@ -507,7 +518,7 @@ function showStatus(kind, title, body) {
 // --- wiring -----------------------------------------------------------------------------
 
 function setOption(key, raw) {
-  const value = ['threshold', 'dims'].includes(key) ? Number(raw) : raw;
+  const value = key === 'dims' ? Number(raw) : raw;
   if (key === 'scope') {
     if (value === 'hood') {
       state.focus = state.selected || state.focus;
@@ -522,7 +533,7 @@ function setOption(key, raw) {
     if (value !== state.dims) switchDims(value);
   } else {
     state[key] = value;
-    if (key === 'sideMode' || key === 'threshold') rebuild();
+    if (key === 'sideMode' || key === 'fluxScaleMode') rebuild();
     else view.set(key, value);
   }
   renderAll();
@@ -631,7 +642,8 @@ function wire() {
     if (t.classList.contains('switch')) {
       const key = t.dataset.key;
       state[key] = !state[key];
-      view.set(key, state[key]);
+      if (key === 'showZero') rebuild();
+      else view.set(key, state[key]);
       renderAll();
       return;
     }
@@ -670,6 +682,24 @@ function wire() {
     renderAll();
   });
 
+  // Flux range: labels and count follow the drag; the graph rebuilds on release.
+  for (const input of [$('flux-lo'), $('flux-hi')]) {
+    input.addEventListener('input', () => {
+      const lo = $('flux-lo');
+      const hi = $('flux-hi');
+      if (Number(lo.value) > Number(hi.value)) input.value = input === lo ? hi.value : lo.value;
+      renderFluxFilter(sliderRange());
+    });
+    input.addEventListener('change', () => {
+      const { min, max } = sliderRange();
+      state.fluxMin = min;
+      state.fluxMax = max;
+      rebuild();
+      renderAll();
+    });
+  }
+  $('scale-open').addEventListener('click', showFluxSettings);
+
   $('hops-down').addEventListener('click', () => changeHops(-1));
   $('hops-up').addEventListener('click', () => changeHops(1));
   $('cut-toggle').addEventListener('click', () => {
@@ -693,6 +723,83 @@ function wire() {
   });
 }
 
+// --- flux filter ---------------------------------------------------------------------
+// The range slider runs 0..STEPS on a log scale over the model's non-zero |v|;
+// a handle at either end leaves that side of the range open.
+
+const STEPS = 1000;
+let attentionTimer = 0;
+
+function resetFluxFilter() {
+  state.fluxDomain = fluxDomain(state.flux);
+  state.fluxMin = state.fluxMax = null;
+}
+
+function fluxRange() {
+  return { min: state.fluxMin, max: state.fluxMax, zero: state.showZero };
+}
+
+function toFlux(pos) {
+  const [lo, hi] = state.fluxDomain;
+  return lo * (hi / lo) ** (pos / STEPS);
+}
+
+function toPos(v) {
+  const [lo, hi] = state.fluxDomain;
+  if (hi <= lo) return 0;
+  return Math.max(0, Math.min(STEPS, Math.round((STEPS * Math.log(v / lo)) / Math.log(hi / lo))));
+}
+
+function sliderRange() {
+  const lo = Number($('flux-lo').value);
+  const hi = Number($('flux-hi').value);
+  return { min: lo > 0 ? toFlux(lo) : null, max: hi < STEPS ? toFlux(hi) : null, zero: state.showZero };
+}
+
+// Without `preview` the handles are set from state; while dragging they lead.
+function renderFluxFilter(preview = null) {
+  const lo = $('flux-lo');
+  const hi = $('flux-hi');
+  const d = state.fluxDomain;
+  lo.disabled = hi.disabled = !d || d[0] === d[1];
+  if (!d) {
+    $('flux-lo-text').textContent = $('flux-hi-text').textContent = '';
+    $('flux-count').textContent = '0';
+    return;
+  }
+  const range = preview || fluxRange();
+  if (!preview) {
+    lo.value = range.min === null ? 0 : toPos(range.min);
+    hi.value = range.max === null ? STEPS : toPos(range.max);
+  }
+  const loText = ui.formatFlux(range.min ?? d[0]);
+  const hiText = ui.formatFlux(range.max ?? d[1]);
+  $('flux-lo-text').textContent = loText;
+  $('flux-hi-text').textContent = hiText;
+  lo.setAttribute('aria-valuetext', loText);
+  hi.setAttribute('aria-valuetext', hiText);
+  const box = $('flux-range');
+  box.style.setProperty('--lo', `${(lo.value / STEPS) * 100}%`);
+  box.style.setProperty('--hi', `${(hi.value / STEPS) * 100}%`);
+  let n = 0;
+  for (const id of state.model.reactions.keys()) if (inFluxRange(state.flux.get(id), range)) n++;
+  $('flux-count').textContent = `${n} of ${state.model.reactions.size}`;
+}
+
+// The legend's colour bar opens the settings and points at the flux filter.
+function showFluxSettings() {
+  state.settingsOpen = true;
+  renderAll();
+  const section = $('flux-filter');
+  section.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  section.classList.remove('attention');
+  void section.offsetWidth; // restart the animation on a repeated click
+  section.classList.add('attention');
+  clearTimeout(attentionTimer);
+  attentionTimer = setTimeout(() => section.classList.remove('attention'), 2000);
+  $('flux-lo').focus({ preventScroll: true });
+}
+
 function changeHops(delta) {
   state.hops = Math.max(1, Math.min(6, state.hops + delta));
   if (state.selected || state.focus) {
@@ -705,7 +812,7 @@ function changeHops(delta) {
 
 // Deep links: ?example loads the bundled model; ?model=<url>[&flux=<url>] loads
 // files by URL; &focus=<id> opens that node's neighbourhood as a 2D map;
-// &from=<id>&to=<id> finds a path.
+// &from=<id>&to=<id> finds a path; &vmin=<|v|>&vmax=<|v|> set the flux range.
 async function loadFromUrl() {
   const params = new URLSearchParams(location.search);
   const modelUrl = params.get('model');
@@ -717,6 +824,14 @@ async function loadFromUrl() {
     if (ok && fluxUrl) loadFlux(await (await fetch(fluxUrl)).text(), fluxUrl.split('/').pop());
   }
   if (!state.model) return;
+  const vmin = Number(params.get('vmin'));
+  const vmax = Number(params.get('vmax'));
+  if (state.flux.size && (vmin > 0 || vmax > 0)) {
+    if (vmin > 0) state.fluxMin = vmin;
+    if (vmax > 0) state.fluxMax = vmax;
+    rebuild();
+    renderAll();
+  }
   const focus = params.get('focus');
   if (focus && (state.model.species.has(focus) || state.model.reactions.has(focus))) {
     select(focus);

@@ -18,6 +18,7 @@ Then open <http://localhost:8000>.
 - `?model=<url>&flux=<url>`: load an SBML file and optional flux CSV by URL
 - `&focus=<id>`: open that species' or reaction's neighbourhood as a 2D map
 - `&from=<id>&to=<id>`: find and show a path between two species
+- `&vmin=<|v|>&vmax=<|v|>`: only show reactions whose |flux| lies in this range
 
 ## Layout
 

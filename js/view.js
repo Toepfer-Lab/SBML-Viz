@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import ForceGraph3D from '3d-force-graph';
 import {
   BG, ACCENT, TEXT, MUTED, LINK, PARTICLE,
-  fluxRGB, endId, fluxScale, nodeColor, degrees, focusSet, clusterForce, nodeTooltip, litSet,
+  fluxRGB, endId, nodeColor, degrees, focusSet, clusterForce, nodeTooltip, litSet,
 } from './style.js';
 import { createLayoutControl, placeFresh } from './layout.js';
 
@@ -326,6 +326,8 @@ export function createView3D(el, { onNodeClick, onFrozen, options }) {
 
   // In fast mode, hide the bulk of the links while the camera moves.
   const controls = Graph.controls();
+  // Middle-drag pans in the screen plane like right-drag; depth stays on the wheel.
+  if (controls.mouseButtons) controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
   controls.addEventListener?.('start', () => { if (effective === 'fast' && batches) batches.links.visible = false; });
   controls.addEventListener?.('end', () => { if (batches) batches.links.visible = true; });
 
@@ -400,7 +402,7 @@ export function createView3D(el, { onNodeClick, onFrozen, options }) {
     dims: 3,
     get live() { return layout.live; },
     qualityText: () => (s.quality === 'auto' ? `auto: ${effective}` : effective),
-    setData(graph, { styles, live }) {
+    setData(graph, { styles, live, fluxT }) {
       const old = new Map(s.graph.nodes.map(n => [n.id, n]));
       const degree = degrees(graph);
       for (const n of graph.nodes) {
@@ -416,7 +418,7 @@ export function createView3D(el, { onNodeClick, onFrozen, options }) {
         l.source = nodeById.get(endId(l.source));
         l.target = nodeById.get(endId(l.target));
       }
-      s.fluxT = fluxScale(graph.links);
+      s.fluxT = fluxT;
       s.hubs = new Set(graph.nodes.filter(n => n.kind === 'met').sort((a, b) => b.degree - a.degree).slice(0, 30).map(n => n.id));
       s.graph = graph;
       s.styles = styles;

@@ -76,7 +76,6 @@ h1, h2, h3, p { margin: 0; }
 }
 .seg-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .seg-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.seg-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .seg-col { grid-template-columns: 1fr; padding: 2px; gap: 2px; border: 0; }
 .seg button {
   height: 36px; padding: 0 4px; border: 0; border-radius: 7px; font-size: 13px;
@@ -116,8 +115,7 @@ h1, h2, h3, p { margin: 0; }
   display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px;
   padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
 }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; color: var(--accent); }
-.brand span { color: var(--text); }
+.brand { font-weight: 600; font-size: 16px; }
 .model-chip {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 12px; min-width: 0;
   border: 1px solid var(--line); border-radius: 8px; background: var(--raised);
@@ -231,7 +229,12 @@ h1, h2, h3, p { margin: 0; }
 .sw-rxn { width: 10px; height: 10px; border-radius: 2px; background: var(--muted); }
 .sw-rxn-rev { width: 10px; height: 10px; border-radius: 2px; border: 1.5px solid var(--muted); }
 .sw-flip { width: 14px; height: 14px; margin: -2px; border-radius: 50%; border: 1px dashed var(--muted); }
-.scale-bar { width: 180px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--flux-low), var(--flux)); }
+.scale-btn {
+  display: flex; flex-direction: column; gap: 4px; margin: -4px; padding: 4px; border: 0; border-radius: 6px;
+  background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+.scale-btn:hover { background: var(--chip); }
+.scale-bar { display: block; width: 180px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, var(--flux-low), var(--flux)); }
 .scale-ticks { width: 180px; display: flex; justify-content: space-between; color: var(--muted); }
 body:not(.has-flux) .flux-only { display: none !important; }
 body.is-2d .only-3d, body:not(.is-2d) .only-2d { display: none !important; }
@@ -253,6 +256,40 @@ body.is-2d .only-3d, body:not(.is-2d) .only-2d { display: none !important; }
 .add-side input {
   flex: 1 1 auto; min-width: 0; height: 32px; padding: 0 10px; border-radius: 8px;
   border: 1px solid var(--line-strong); background: var(--ground); font-family: var(--mono); font-size: 12px;
+}
+
+/* Flux range: two range inputs stacked on one track; only the thumbs take pointer input. */
+.range { position: relative; height: 24px; --lo: 0%; --hi: 100%; }
+.range::before, .range-fill {
+  content: ''; position: absolute; top: 50%; height: 6px; margin-top: -3px; border-radius: 3px; pointer-events: none;
+}
+.range::before { left: 0; right: 0; background: var(--line); }
+.range-fill { left: var(--lo); right: calc(100% - var(--hi)); background: var(--flux); }
+.range input {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  background: none; pointer-events: none; -webkit-appearance: none; appearance: none;
+}
+.range input::-webkit-slider-runnable-track { background: none; }
+.range input::-moz-range-track { background: none; }
+.range input::-webkit-slider-thumb {
+  -webkit-appearance: none; pointer-events: auto; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--text); border: 2px solid var(--ground); cursor: pointer;
+}
+.range input::-moz-range-thumb {
+  pointer-events: auto; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--text); border: 2px solid var(--ground); cursor: pointer;
+}
+.range input:disabled::-webkit-slider-thumb { cursor: default; background: var(--muted); }
+.range input:disabled::-moz-range-thumb { cursor: default; background: var(--muted); }
+.range-ticks { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+
+/* Drawn to a settings section opened from elsewhere (the legend's colour bar). */
+.attention { border-radius: 8px; animation: attention 0.6s ease-in-out 3; }
+@keyframes attention {
+  50% { background: var(--active); box-shadow: 0 0 0 8px var(--active), 0 0 0 9px var(--accent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .attention { animation: none; background: var(--active); box-shadow: 0 0 0 8px var(--active), 0 0 0 9px var(--accent); }
 }
 
 /* Inspector */

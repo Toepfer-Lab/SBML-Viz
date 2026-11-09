@@ -3,7 +3,7 @@
 import ForceGraph from 'force-graph';
 import {
   BG, ACCENT, TEXT, LINK, SIDE, SIDE_LABEL, PARTICLE, DIM,
-  fluxColor, hexAlpha, endId, fluxScale, nodeColor, degrees, focusSet, clusterForce, nodeTooltip, litSet,
+  fluxColor, hexAlpha, endId, nodeColor, degrees, focusSet, clusterForce, nodeTooltip, litSet,
 } from './style.js';
 import { createLayoutControl, placeFresh } from './layout.js';
 
@@ -194,7 +194,7 @@ export function createView2D(el, { onNodeClick, onFrozen, options }) {
     dims: 2,
     get live() { return layout.live; },
     qualityText: () => '',
-    setData(graph, { styles, live }) {
+    setData(graph, { styles, live, fluxT }) {
       const old = new Map(s.graph.nodes.map(n => [n.id, n]));
       const degree = degrees(graph);
       for (const n of graph.nodes) {
@@ -209,7 +209,7 @@ export function createView2D(el, { onNodeClick, onFrozen, options }) {
         l.source = byId.get(endId(l.source));
         l.target = byId.get(endId(l.target));
       }
-      s.fluxT = fluxScale(graph.links);
+      s.fluxT = fluxT;
       s.hubs = new Set(graph.nodes.filter(n => n.kind === 'met').sort((a, b) => b.degree - a.degree).slice(0, 30).map(n => n.id));
       s.graph = graph;
       s.styles = styles;

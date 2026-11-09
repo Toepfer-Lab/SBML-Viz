@@ -1,4 +1,5 @@
 // Visual language shared by the 2D and 3D views (see the "Visual language" design board).
+import { FLUX_EPS } from './graph.js';
 
 export const BG = '#0E1014';
 export const ACCENT = '#5CC8E8';
@@ -40,16 +41,24 @@ export function endId(end) {
   return typeof end === 'object' ? end.id : end;
 }
 
-// Log scale over the |v| present in the drawn links -> t in [0, 1].
-export function fluxScale(links) {
-  const vs = links.map(l => l.v).filter(v => v > 0);
-  const max = vs.length ? Math.max(...vs) : 1;
-  const min = vs.length ? Math.max(Math.min(...vs), max * 1e-6) : 1;
-  return v => {
+// Log scale over `domain` ([min, max] |v|), or over the links' own flux when
+// no domain is given. `scale.range` is the span actually used, for the legend.
+export function fluxScale(links, domain = null) {
+  let [lo, hi] = domain || [Infinity, 0];
+  if (!domain) {
+    for (const l of links) {
+      if (l.v >= FLUX_EPS) { lo = Math.min(lo, l.v); hi = Math.max(hi, l.v); }
+    }
+  }
+  const max = hi > 0 ? hi : 1;
+  const min = hi > 0 ? Math.max(lo, max * 1e-6) : 1;
+  const scale = v => {
     if (!v || v <= 0) return 0;
     if (max <= min) return 1;
     return Math.min(1, Math.max(0, Math.log10(v / min) / Math.log10(max / min)));
   };
+  scale.range = hi > 0 ? [min, max] : null;
+  return scale;
 }
 
 export function nodeColor(n, styles) {

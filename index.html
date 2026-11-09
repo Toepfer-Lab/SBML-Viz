@@ -22,10 +22,7 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="8" r="2.5"/><circle cx="10" cy="18" r="2.5"/><path d="M8.3 7l7.4 .8M7.2 8.2l1.8 7.6M16.6 10.1l-4.8 6"/></svg>
-      <span>SBML Viz</span>
-    </div>
+    <div class="brand">SBML Viz</div>
     <div class="model-chip" id="model-chip" hidden>
       <span class="mono" id="chip-name"></span>
       <span id="chip-stats" class="muted"></span>
@@ -153,7 +150,7 @@
         </button>
         <span class="stat mono" id="stats"></span>
         <div class="spacer"></div>
-        <span class="hint only-3d">Drag to orbit · Right-drag to pan · Scroll to zoom · Double-click a node to fly to it</span>
+        <span class="hint only-3d">Drag to orbit · Right- or middle-drag to pan · Scroll to zoom · Double-click a node to fly to it</span>
         <span class="hint only-2d">Drag to pan · Scroll to zoom · Double-click a node to centre it</span>
       </div>
 
@@ -165,8 +162,10 @@
         <div class="flux-only"><span class="sw sw-flip"></span>Runs against written direction</div>
         <div class="flux-only legend-scale">
           <span class="muted">|v| · particles travel with the flow, faster = larger |v|</span>
-          <div class="scale-bar"></div>
-          <div class="scale-ticks mono"><span id="legend-min">0</span><span id="legend-max"></span></div>
+          <button class="scale-btn" id="scale-open" title="Filter reactions by flux and set the colour scale">
+            <span class="scale-bar"></span>
+            <span class="scale-ticks mono"><span id="legend-min"></span><span id="legend-max"></span></span>
+          </button>
         </div>
       </div>
 
@@ -204,16 +203,25 @@
           </form>
         </div>
 
-        <div class="stack-10 flux-only">
-          <h3 class="eyebrow">Hide reactions with |v| below</h3>
-          <div class="seg seg-5" data-key="threshold" role="group" aria-label="Flux threshold">
-            <button data-value="0">0</button>
-            <button data-value="1">10⁻⁶</button>
-            <button data-value="2">10⁻³</button>
-            <button data-value="3">0.1</button>
-            <button data-value="4">1</button>
+        <div class="stack-10 flux-only" id="flux-filter">
+          <h3 class="eyebrow">Show reactions with |v| between</h3>
+          <div class="range" id="flux-range">
+            <span class="range-fill"></span>
+            <input type="range" id="flux-lo" min="0" max="1000" step="1" value="0" aria-label="Lowest |v| shown">
+            <input type="range" id="flux-hi" min="0" max="1000" step="1" value="1000" aria-label="Highest |v| shown">
           </div>
-          <span class="muted small"><span class="mono strong" id="threshold-count"></span> reactions shown</span>
+          <div class="range-ticks mono"><span id="flux-lo-text"></span><span id="flux-hi-text"></span></div>
+          <button class="switch" role="switch" data-key="showZero">Include reactions with zero flux</button>
+          <span class="muted small"><span class="mono strong" id="flux-count"></span> reactions in range. Log scale; the graph updates when you let go.</span>
+        </div>
+
+        <div class="stack-10 flux-only">
+          <h3 class="eyebrow">Colour scale</h3>
+          <div class="seg seg-2" data-key="fluxScaleMode" role="group" aria-label="Colour scale range">
+            <button data-value="model">Whole model</button>
+            <button data-value="visible">Shown reactions</button>
+          </div>
+          <span class="muted small">Whole model keeps colours fixed while you filter. Shown reactions stretches the scale over what is drawn.</span>
         </div>
 
         <div class="stack-10">
