@@ -4,6 +4,7 @@ import { createView3D } from './view.js';
 import { createView2D } from './view2d.js';
 import { fluxScale, escapeHtml, endId } from './style.js';
 import * as ui from './ui.js';
+import { recallLayout, rememberLayout, forgetLayout } from './layout-store.js';
 
 const $ = id => document.getElementById(id);
 
@@ -100,7 +101,8 @@ let lastFps = performance.now();
 // `quiet` skips the decoding note. `keep` ({ selected, focus, scope } with SBML
 // ids) re-shows the same file with a decoding setting changed: layouts,
 // hidden compartments, side metabolites and the selection carry over.
-function loadModel(raw, fluxRows, fileName, { quiet = false, keep = null } = {}) {
+// `remembered` is the layout this browser kept from the last time (see recallLayout).
+function loadModel(raw, fluxRows, fileName, { quiet = false, keep = null, remembered = null } = {}) {
   state.rawModel = raw;
   const found = findEncodings(raw);
   const { model, entries } = decodeModelIds(raw, {
@@ -123,8 +125,9 @@ function loadModel(raw, fluxRows, fileName, { quiet = false, keep = null } = {})
   if (!keep) {
     state.side = new Set(detectSide(state.index));
     state.hiddenCompartments = new Set([...state.styles.values()].filter(c => c.label === 'Boundary').map(c => c.id));
-    layouts[2] = {};
-    layouts[3] = {};
+    flushRemember();
+    layouts[2] = { ...remembered?.[2] };
+    layouts[3] = { ...remembered?.[3] };
   }
   const kept = id => (id && (model.species.has(shownId(id)) || model.reactions.has(shownId(id))) ? shownId(id) : null);
   state.focus = kept(keep?.focus);
@@ -154,6 +157,10 @@ function loadModel(raw, fluxRows, fileName, { quiet = false, keep = null } = {})
   ui.renderPathResult($('path-result'), null);
   renderAll();
   $('btn-restore').disabled = !readLayout();
+  if (remembered && !keep) {
+    toast('Showing the layout from the last time you opened this model.', false, 8000,
+      { label: 'Lay out again', run: layOutAgain });
+  }
 }
 
 function loadFlux(text, name) {
@@ -237,8 +244,8 @@ async function loadSBML(source, name) {
   try {
     const model = await parseInWorker(source, name);
     showProgress('Building graph', 1);
-    await new Promise(r => setTimeout(r, 30));
-    loadModel(model, null, name);
+    const remembered = await recallLayout(layoutKey(model));
+    loadModel(model, null, name, { remembered });
     return true;
   } catch (err) {
     showStatus('error', `Could not read ${name}`, err.message);
@@ -262,7 +269,7 @@ async function loadExample() {
     const res = await fetch('data/example-model.json');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const { model, flux } = modelFromGraphJSON(await res.json());
-    loadModel(model, flux, 'bundled example');
+    loadModel(model, flux, 'bundled example', { remembered: await recallLayout(layoutKey(model)) });
   } catch (err) {
     showStatus('error', 'Could not load the example', `${err.message}. Serve the folder over HTTP (e.g. python3 -m http.server) instead of opening index.html directly.`);
   }
@@ -616,8 +623,8 @@ function search(q) {
 // --- layouts, export, messages --------------------------------------------------------
 
 // Keyed by the file as parsed, so a saved layout is found whatever is decoded.
-function layoutKey() {
-  return 'sbml-viz:layout:' + modelKey(state.rawModel);
+function layoutKey(raw = state.rawModel) {
+  return 'sbml-viz:layout:' + modelKey(raw);
 }
 
 // A side metabolite copy (species@reaction) is keyed by both SBML ids.
@@ -627,6 +634,40 @@ function layoutId(n) {
 
 function storePositions() {
   for (const [id, p] of Object.entries(view.positions())) layouts[state.dims][layoutIds.get(id) ?? id] = p;
+  scheduleRemember();
+}
+
+// Whatever was stored last is remembered for the next visit, a moment later so a
+// burst of changes is written once.
+let remembering = null; // { timer, key, layouts }
+
+function scheduleRemember() {
+  if (!state.rawModel) return;
+  clearTimeout(remembering?.timer);
+  const job = { key: layoutKey(), layouts: { 2: layouts[2], 3: layouts[3] } };
+  job.timer = setTimeout(flushRemember, 1000);
+  remembering = job;
+}
+
+function flushRemember() {
+  if (!remembering) return;
+  clearTimeout(remembering.timer);
+  const { key, layouts: both } = remembering;
+  remembering = null;
+  if (Object.keys(both[2]).length || Object.keys(both[3]).length) rememberLayout(key, both);
+}
+
+// Drops the remembered layout and computes a new one for the mode shown; the
+// other mode is laid out again when it is next shown.
+function layOutAgain() {
+  clearTimeout(remembering?.timer);
+  remembering = null;
+  forgetLayout(layoutKey());
+  layouts[2] = {};
+  layouts[3] = {};
+  mountView(state.dims);
+  rebuild();
+  renderAll();
 }
 
 function readLayout() {
@@ -655,6 +696,7 @@ function restoreLayout() {
   const both = saved.v === 2 ? saved : { 2: saved, 3: saved };
   layouts[2] = { ...both[2] };
   layouts[3] = { ...both[3] };
+  scheduleRemember();
   // A fresh view, so rebuild() does not fold the current positions back in.
   mountView(state.dims);
   rebuild();
@@ -770,6 +812,7 @@ function wire() {
   $('btn-open').addEventListener('click', () => $('sbml-input').click());
   $('btn-save').addEventListener('click', saveLayout);
   $('btn-restore').addEventListener('click', restoreLayout);
+  addEventListener('pagehide', flushRemember);
   $('btn-export').addEventListener('click', exportPng);
   $('layout-toggle').addEventListener('click', () => setLive(!state.live));
   $('layout-stop').addEventListener('click', stopLayout);

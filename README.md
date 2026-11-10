@@ -31,7 +31,10 @@ the graph is. A few nodes added later (a growing neighbourhood) settle on
 screen too; many added at once are laid out in the worker around the others.
 
 2D and 3D are independent: each gets its own layout the first time it is
-shown, and switching back restores it. *Save layout* stores both in the browser.
+shown, and switching back restores it. The browser remembers the latest layout
+of the last ten models (IndexedDB), so reopening a model shows it as it was
+left; *Lay out again* in the message that appears computes a new one. *Save
+layout* additionally keeps a snapshot that *Restore layout* returns to.
 
 ## Input
 
@@ -58,6 +61,7 @@ shown, and switching back restores it. *Save layout* stores both in the browser.
 | `js/graph.js` | Pure graph building: scope/hops, side metabolites, flux threshold, compartments; path finding |
 | `js/layout.js` | Force settings, frozen layout and placement of a few new nodes, shared by both views |
 | `js/layout-worker.js` | Computes layouts off the main thread until the simulation runs out of energy |
+| `js/layout-store.js` | Remembers the latest layout per model in IndexedDB |
 | `js/view.js` | 3D overview: 3d-force-graph for layout and picking, batched (instanced) three.js drawing |
 | `js/view2d.js` | 2D reaction map: force-graph canvas rendering |
 | `js/style.js` | Shared visual language (colors, flux scale, cluster force) |
@@ -67,7 +71,9 @@ shown, and switching back restores it. *Save layout* stores both in the browser.
 
 Libraries come from jsDelivr via the import map in `index.html`. Keep
 `3d-force-graph` and `three` on versions whose bundles reference the same
-three.js URL, or three.js loads twice.
+three.js URL, or three.js loads twice. For the same reason the import map
+points `three/webgpu` (an optional renderer in three-render-objects, with its
+own copy of three.js) at `js/webgpu-stub.js`; update that URL with `three`.
 
 ## Test
 
